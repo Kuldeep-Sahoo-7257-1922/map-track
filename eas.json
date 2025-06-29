@@ -6,13 +6,22 @@
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "env": {
+        "EXPO_TARGET_ANDROID_SDK_VERSION": "34"
+      }
     },
     "preview": {
-      "distribution": "internal"
+      "distribution": "internal",
+      "env": {
+        "EXPO_TARGET_ANDROID_SDK_VERSION": "34"
+      }
     },
     "production": {
-      "autoIncrement": true
+      "autoIncrement": true,
+      "env": {
+        "EXPO_TARGET_ANDROID_SDK_VERSION": "34"
+      }
     }
   },
   "submit": {
