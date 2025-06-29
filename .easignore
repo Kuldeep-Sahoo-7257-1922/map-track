@@ -1,0 +1,5 @@
+# Ignore Windows/Office junk
+AppData/
+Temp/
+*.tmp
+*.log
