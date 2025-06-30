@@ -18,7 +18,11 @@
       "supportsTablet": true,
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "This app needs access to location to track your GPS coordinates.",
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "This app needs access to location to track your GPS coordinates."
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "This app needs access to location to track your GPS coordinates even when the app is in the background.",
+        "UIBackgroundModes": [
+          "location",
+          "background-processing"
+        ]
       }
     },
     "android": {
@@ -29,11 +33,16 @@
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION",
+        "WAKE_LOCK",
         "WRITE_EXTERNAL_STORAGE",
         "READ_EXTERNAL_STORAGE",
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION",
-        "android.permission.FOREGROUND_SERVICE"
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.ACCESS_BACKGROUND_LOCATION"
       ],
       "package": "com.kuldeepsahoo.locationtracker"
     },
@@ -44,8 +53,14 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Allow Location Tracker to use your location to track GPS coordinates."
+          "locationAlwaysAndWhenInUsePermission": "Allow Location Tracker to use your location to track GPS coordinates even when the app is in the background.",
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
         }
+      ],
+      [
+        "expo-task-manager"
       ]
     ],
     "extra": {

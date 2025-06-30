@@ -2,6 +2,14 @@ import AsyncStorage from "@react-native-async-storage/async-storage"
 import type { LocationPoint, SavedTrack, TrackStats } from "../types"
 
 const STORAGE_KEY = "location-tracker-tracks"
+const CURRENT_TRACK_KEY = "location-tracker-current-track"
+
+export interface CurrentTrackInfo {
+  trackId: string
+  trackName: string
+  isTracking: boolean
+  startTime: number
+}
 
 export const storageUtils = {
   // Get all saved tracks
@@ -30,6 +38,7 @@ export const storageUtils = {
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(tracks))
     } catch (error) {
       console.error("Error saving track to storage:", error)
+      throw error
     }
   },
 
@@ -41,6 +50,7 @@ export const storageUtils = {
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(filteredTracks))
     } catch (error) {
       console.error("Error deleting track from storage:", error)
+      throw error
     }
   },
 
@@ -64,6 +74,8 @@ export const storageUtils = {
       const prev = locations[i - 1]
       const curr = locations[i]
 
+      if (!prev || !curr) continue
+
       // Haversine formula for distance calculation
       const R = 6371e3 // Earth's radius in meters
       const φ1 = (prev.latitude * Math.PI) / 180
@@ -80,5 +92,58 @@ export const storageUtils = {
     const duration = (locations[locations.length - 1]?.timestamp - locations[0]?.timestamp) / 1000
 
     return { distance: totalDistance, duration }
+  },
+
+  // Current track management for background tracking
+  setCurrentTrackInfo: async (info: CurrentTrackInfo): Promise<void> => {
+    try {
+      await AsyncStorage.setItem(CURRENT_TRACK_KEY, JSON.stringify(info))
+    } catch (error) {
+      console.error("Error saving current track info:", error)
+      throw error
+    }
+  },
+
+  getCurrentTrackInfo: async (): Promise<CurrentTrackInfo | null> => {
+    try {
+      const stored = await AsyncStorage.getItem(CURRENT_TRACK_KEY)
+      return stored ? JSON.parse(stored) : null
+    } catch (error) {
+      console.error("Error getting current track info:", error)
+      return null
+    }
+  },
+
+  clearCurrentTrackInfo: async (): Promise<void> => {
+    try {
+      await AsyncStorage.removeItem(CURRENT_TRACK_KEY)
+    } catch (error) {
+      console.error("Error clearing current track info:", error)
+    }
+  },
+
+  // Add location to current track (for background updates)
+  addLocationToCurrentTrack: async (location: LocationPoint): Promise<void> => {
+    try {
+      const currentTrackInfo = await storageUtils.getCurrentTrackInfo()
+      if (!currentTrackInfo) return
+
+      const track = await storageUtils.getTrack(currentTrackInfo.trackId)
+      if (!track) return
+
+      // Add location to track
+      track.locations.push(location)
+      track.lastModified = Date.now()
+
+      // Recalculate stats
+      const stats = storageUtils.calculateTrackStats(track.locations)
+      track.totalDistance = stats.distance
+      track.duration = stats.duration
+
+      // Save updated track
+      await storageUtils.saveTrack(track)
+    } catch (error) {
+      console.error("Error adding location to current track:", error)
+    }
   },
 }
