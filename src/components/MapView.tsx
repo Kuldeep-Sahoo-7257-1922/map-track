@@ -1,20 +1,20 @@
-"use client"
+"use client";
 
-import type React from "react"
-import { useEffect, useRef, useState } from "react"
-import { View, StyleSheet } from "react-native"
-import { WebView } from "react-native-webview"
-import type { LocationPoint } from "../types"
+import type React from "react";
+import { useEffect, useRef, useState } from "react";
+import { View, StyleSheet, Text } from "react-native";
+import { WebView } from "react-native-webview";
+import type { LocationPoint } from "../types";
 
 interface Props {
-  locations: LocationPoint[]
-  currentLocation: LocationPoint | null
-  isTracking: boolean
-  isDarkTheme?: boolean
-  style?: any
-  showLayerSelector?: boolean
-  isFullscreen?: boolean
-  onExitFullscreen?: () => void
+  locations: LocationPoint[];
+  currentLocation: LocationPoint | null;
+  isTracking: boolean;
+  isDarkTheme?: boolean;
+  style?: any;
+  showLayerSelector?: boolean;
+  isFullscreen?: boolean;
+  onExitFullscreen?: () => void;
 }
 
 const MapComponent: React.FC<Props> = ({
@@ -27,8 +27,8 @@ const MapComponent: React.FC<Props> = ({
   isFullscreen = false,
   onExitFullscreen,
 }) => {
-  const webViewRef = useRef<WebView>(null)
-  const [isMapLoaded, setIsMapLoaded] = useState(false)
+  const webViewRef = useRef<WebView>(null);
+  const [isMapLoaded, setIsMapLoaded] = useState(false);
 
   // Generate HTML for Leaflet map with error handling
   const generateMapHTML = () => {
@@ -54,30 +54,76 @@ const MapComponent: React.FC<Props> = ({
     }
     .layer-control {
       position: absolute;
-      top: 10px;
+      top: 70px; /* Moved down below header */
       right: 10px;
       z-index: 1000;
-      background: rgba(255, 255, 255, 0.95);
+      background: ${
+        isDarkTheme ? "rgba(0, 0, 0, 0.9)" : "rgba(255, 255, 255, 0.95)"
+      };
       border-radius: 8px;
       padding: 8px;
       box-shadow: 0 2px 10px rgba(0,0,0,0.3);
       min-width: 150px;
+      border: 1px solid ${isDarkTheme ? "#374151" : "#e2e8f0"};
     }
     .layer-control select {
-      border: 1px solid #ccc;
-      background: white;
+      border: 1px solid ${isDarkTheme ? "#555" : "#ccc"};
+      background: ${isDarkTheme ? "rgba(0, 0, 0, 0.8)" : "white"};
+      color: ${isDarkTheme ? "white" : "black"};
       font-size: 14px;
       padding: 6px;
       border-radius: 4px;
       width: 100%;
+    }
+    .map-controls {
+      position: absolute;
+      top: 140px; /* Below layer control */
+      right: 10px;
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .control-button {
+      width: 40px;
+      height: 40px;
+      background: ${
+        isDarkTheme ? "rgba(0, 0, 0, 0.9)" : "rgba(255, 255, 255, 0.95)"
+      };
+      border: 1px solid ${isDarkTheme ? "#374151" : "#e2e8f0"};
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 18px;
+      font-weight: bold;
+      color: ${isDarkTheme ? "white" : "black"};
+      box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+      transition: all 0.2s ease;
+    }
+    .control-button:hover {
+      background: ${
+        isDarkTheme ? "rgba(40, 40, 40, 0.9)" : "rgba(240, 240, 240, 0.95)"
+      };
+      transform: scale(1.05);
+    }
+    .control-button:active {
+      transform: scale(0.95);
+    }
+    .current-location-btn {
+      font-size: 16px;
     }
     .exit-fullscreen {
       position: absolute;
       top: 10px;
       left: 10px;
       z-index: 1000;
-      background: rgba(255, 255, 255, 0.95);
-      border: 1px solid #ccc;
+      background: ${
+        isDarkTheme ? "rgba(0, 0, 0, 0.9)" : "rgba(255, 255, 255, 0.95)"
+      };
+      color: ${isDarkTheme ? "white" : "black"};
+      border: 1px solid ${isDarkTheme ? "#555" : "#ccc"};
       border-radius: 6px;
       padding: 8px 12px;
       font-size: 14px;
@@ -85,14 +131,19 @@ const MapComponent: React.FC<Props> = ({
       box-shadow: 0 2px 10px rgba(0,0,0,0.3);
     }
     .exit-fullscreen:hover {
-      background: rgba(240, 240, 240, 0.95);
+      background: ${
+        isDarkTheme ? "rgba(40, 40, 40, 0.9)" : "rgba(240, 240, 240, 0.95)"
+      };
     }
     .error-message {
       position: absolute;
       top: 50%;
       left: 50%;
       transform: translate(-50%, -50%);
-      background: rgba(255, 255, 255, 0.95);
+      background: ${
+        isDarkTheme ? "rgba(0, 0, 0, 0.9)" : "rgba(255, 255, 255, 0.95)"
+      };
+      color: ${isDarkTheme ? "white" : "black"};
       padding: 20px;
       border-radius: 8px;
       box-shadow: 0 2px 10px rgba(0,0,0,0.3);
@@ -122,33 +173,6 @@ const MapComponent: React.FC<Props> = ({
     .current-location-marker svg {
       transition: transform 0.3s ease;
     }
-    ${
-      isDarkTheme
-        ? `
-    .layer-control {
-      background: rgba(0, 0, 0, 0.9);
-      color: white;
-    }
-    .layer-control select {
-      color: white;
-      background: rgba(0, 0, 0, 0.8);
-      border-color: #555;
-    }
-    .exit-fullscreen {
-      background: rgba(0, 0, 0, 0.9);
-      color: white;
-      border-color: #555;
-    }
-    .exit-fullscreen:hover {
-      background: rgba(40, 40, 40, 0.9);
-    }
-    .error-message {
-      background: rgba(0, 0, 0, 0.9);
-      color: white;
-    }
-    `
-        : ""
-    }
   </style>
 </head>
 <body>
@@ -174,12 +198,16 @@ const MapComponent: React.FC<Props> = ({
       ? `
   <div class="layer-control">
     <select id="layerSelect" onchange="changeLayer()">
-      <option value="osm">🗺️ Street Map</option>
-      <option value="satellite" ${isDarkTheme ? "" : "selected"}>🛰️ Satellite</option>
-      <option value="terrain">🏔️ Terrain</option>
-      <option value="dark" ${isDarkTheme ? "selected" : ""}>🌙 Dark</option>
-      <option value="light">☀️ Light</option>
+      <option value="satellite" selected>satellite</option>
+      <option value="osm">Street Map</option>
+      <option value="terrain">Terrain</option>
     </select>
+  </div>
+  
+  <div class="map-controls">
+    <button class="control-button" onclick="zoomIn()">+</button>
+    <button class="control-button" onclick="zoomOut()">−</button>
+    <button class="control-button current-location-btn" onclick="goToCurrentLocation()" id="currentLocationBtn" style="display: none;">📍</button>
   </div>
   `
       : ""
@@ -220,14 +248,16 @@ const MapComponent: React.FC<Props> = ({
     let map = null;
     let currentTileLayer = null;
     let trackLayerGroup = null;
+    let userCurrentLocation = null;
 
-    // Map layers with fallback
+    // Map layers with zoom restrictions
     const mapLayers = {
       osm: {
         url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
         options: {
           attribution: '© OpenStreetMap contributors',
-          maxZoom: 19,
+          maxZoom: 18, // Restricted from 19 to 18
+          minZoom: 2,
           timeout: 10000
         }
       },
@@ -235,7 +265,8 @@ const MapComponent: React.FC<Props> = ({
         url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
         options: {
           attribution: '© Esri, © DigitalGlobe',
-          maxZoom: 19,
+          maxZoom: 18, // Restricted from 19 to 18
+          minZoom: 2,
           timeout: 10000
         }
       },
@@ -243,23 +274,8 @@ const MapComponent: React.FC<Props> = ({
         url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
         options: {
           attribution: '© OpenTopoMap contributors',
-          maxZoom: 17,
-          timeout: 10000
-        }
-      },
-      dark: {
-        url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-        options: {
-          attribution: '© OpenStreetMap contributors © CARTO',
-          maxZoom: 19,
-          timeout: 10000
-        }
-      },
-      light: {
-        url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-        options: {
-          attribution: '© OpenStreetMap contributors © CARTO',
-          maxZoom: 19,
+          maxZoom: 16, // Restricted from 17 to 16
+          minZoom: 2,
           timeout: 10000
         }
       }
@@ -283,17 +299,19 @@ const MapComponent: React.FC<Props> = ({
           });
         }
 
-        // Initialize map
+        // Initialize map with zoom restrictions
         map = window.L.map('map', {
-          zoomControl: true,
+          zoomControl: false, // Disable default zoom controls
           attributionControl: true,
-          preferCanvas: true // Better performance for many markers
+          preferCanvas: true, // Better performance for many markers
+          maxZoom: 18, // Global max zoom restriction
+          minZoom: 2   // Global min zoom restriction
         }).setView([0, 0], 13);
 
         trackLayerGroup = window.L.layerGroup().addTo(map);
 
-        // Set initial layer
-        const initialLayer = ${isDarkTheme ? "'dark'" : "'satellite'"};
+        // Set initial layer to Satellite (default)
+        const initialLayer = 'satellite';
         const layerConfig = mapLayers[initialLayer];
         currentTileLayer = window.L.tileLayer(layerConfig.url, layerConfig.options);
         currentTileLayer.addTo(map);
@@ -302,6 +320,9 @@ const MapComponent: React.FC<Props> = ({
         currentTileLayer.on('tileerror', function(e) {
           console.warn('Tile loading error:', e);
         });
+
+        // Get user's current location and focus on it
+        window.getCurrentLocationAndFocus();
 
         window.hideErrorMessage();
         
@@ -320,6 +341,79 @@ const MapComponent: React.FC<Props> = ({
       }
     }
 
+    // Get current location and focus on it
+    window.getCurrentLocationAndFocus = function() {
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          function(position) {
+            userCurrentLocation = {
+              lat: position.coords.latitude,
+              lng: position.coords.longitude
+            };
+            
+            // Focus on current location
+            if (map && userCurrentLocation) {
+              map.setView([userCurrentLocation.lat, userCurrentLocation.lng], 15);
+            }
+          },
+          function(error) {
+            console.warn('Could not get current location:', error);
+            // Fallback to default view
+            if (map) {
+              map.setView([0, 0], 2);
+            }
+          },
+          {
+            enableHighAccuracy: true,
+            timeout: 10000,
+            maximumAge: 60000
+          }
+        );
+      }
+    }
+
+    // Go to current location function
+    window.goToCurrentLocation = function() {
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          function(position) {
+            userCurrentLocation = {
+              lat: position.coords.latitude,
+              lng: position.coords.longitude
+            };
+            
+            if (map && userCurrentLocation) {
+              map.setView([userCurrentLocation.lat, userCurrentLocation.lng], 16);
+            }
+          },
+          function(error) {
+            console.error('Error getting current location:', error);
+            alert('Could not get your current location. Please check location permissions.');
+          },
+          {
+            enableHighAccuracy: true,
+            timeout: 10000,
+            maximumAge: 60000
+          }
+        );
+      } else {
+        alert('Geolocation is not supported by this browser.');
+      }
+    }
+
+    // Zoom functions with restrictions
+    window.zoomIn = function() {
+      if (map && map.getZoom() < 18) {
+        map.zoomIn();
+      }
+    }
+
+    window.zoomOut = function() {
+      if (map && map.getZoom() > 2) {
+        map.zoomOut();
+      }
+    }
+
     // Change layer function
     window.changeLayer = function() {
       try {
@@ -330,6 +424,10 @@ const MapComponent: React.FC<Props> = ({
         const layerConfig = mapLayers[selectedLayer];
         currentTileLayer = window.L.tileLayer(layerConfig.url, layerConfig.options);
         currentTileLayer.addTo(map);
+
+        // Update map zoom restrictions based on layer
+        map.setMaxZoom(layerConfig.options.maxZoom);
+        map.setMinZoom(layerConfig.options.minZoom);
 
         // Handle tile loading errors
         currentTileLayer.on('tileerror', function(e) {
@@ -378,289 +476,212 @@ const MapComponent: React.FC<Props> = ({
     }
 
     // Update map with locations
-    window.updateMapData = function(locations, currentLocation, isTracking) {
+    window.updateMapData = function(allTracksData, currentLocation, isTracking) {
       try {
         if (!map || !trackLayerGroup) {
           console.warn('Map not ready for update');
           return;
         }
 
+        // Show/hide current location button based on whether there are tracks
+        const currentLocationBtn = document.getElementById('currentLocationBtn');
+        if (currentLocationBtn) {
+          if (allTracksData && allTracksData.length > 0) {
+            currentLocationBtn.style.display = 'none';
+          } else {
+            currentLocationBtn.style.display = 'flex';
+          }
+        }
+
         // Clear existing track
         trackLayerGroup.clearLayers();
 
-        if (!locations || locations.length === 0) return;
+        if (!allTracksData || allTracksData.length === 0) return;
 
-        // Create track polylines with speed colors
-        if (locations.length > 1) {
-          for (let i = 1; i < locations.length; i++) {
-            const prev = locations[i - 1];
-            const curr = locations[i];
-            
-            if (!prev || !curr || !prev.latitude || !prev.longitude || !curr.latitude || !curr.longitude) {
-              continue;
-            }
-
-            const speed = curr.speed || 0;
-            const color = window.getSpeedColor(speed);
-
-            const segment = window.L.polyline([
-              [prev.latitude, prev.longitude],
-              [curr.latitude, curr.longitude]
-            ], {
-              color: color,
-              weight: 4,
-              opacity: 0.8
-            });
-
-            // Add click popup for segment details
-            const distance = map.distance([prev.latitude, prev.longitude], [curr.latitude, curr.longitude]);
-            const timeDiff = Math.max(1, (curr.timestamp - prev.timestamp) / 1000);
-            const avgSpeed = Math.max(0, (distance / timeDiff) * 3.6);
-
-            segment.bindPopup(\`
-              <div style="min-width: 200px;">
-                <h4 style="margin: 0 0 8px 0; font-weight: bold;">📊 Segment Details</h4>
-                <div style="font-size: 12px; line-height: 1.4;">
-                  <div><strong>Time:</strong> \${new Date(prev.timestamp).toLocaleTimeString()} - \${new Date(curr.timestamp).toLocaleTimeString()}</div>
-                  <div><strong>Distance:</strong> \${distance.toFixed(1)}m</div>
-                  <div><strong>Duration:</strong> \${timeDiff.toFixed(1)}s</div>
-                  <div><strong>Speed:</strong> \${(speed * 3.6).toFixed(1)} km/h</div>
-                  <div><strong>Avg Speed:</strong> \${avgSpeed.toFixed(1)} km/h</div>
-                  \${curr.altitude && prev.altitude ? \`<div><strong>Elevation Change:</strong> \${(curr.altitude - prev.altitude).toFixed(1)}m</div>\` : ''}
-                  <div><strong>Coordinates:</strong></div>
-                  <div>Start: \${prev.latitude.toFixed(6)}, \${prev.longitude.toFixed(6)}</div>
-                  <div>End: \${curr.latitude.toFixed(6)}, \${curr.longitude.toFixed(6)}</div>
-                </div>
-              </div>
-            \`);
-
-            trackLayerGroup.addLayer(segment);
+        // Group locations by track
+        const trackGroups = {};
+        allTracksData.forEach(loc => {
+          if (!trackGroups[loc.trackId]) {
+            trackGroups[loc.trackId] = {
+              locations: [],
+              name: loc.trackName
+            };
           }
+          trackGroups[loc.trackId].locations.push(loc);
+        });
 
-          // Fit map to track bounds
-          try {
-            const allCoords = locations.map(loc => [loc.latitude, loc.longitude]).filter(coord => coord[0] && coord[1]);
-            if (allCoords.length > 0) {
-              const bounds = window.L.latLngBounds(allCoords);
-              map.fitBounds(bounds, { padding: [20, 20] });
-            }
-          } catch (error) {
-            console.warn('Error fitting bounds:', error);
-          }
-        } else if (locations.length === 1) {
-          // Center on single location
-          const loc = locations[0];
-          if (loc && loc.latitude && loc.longitude) {
-            map.setView([loc.latitude, loc.longitude], 15);
-          }
-        }
+        // Color palette for different tracks
+        const trackColors = ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16'];
+        let colorIndex = 0;
+        let allCoords = [];
 
-        // Add start marker (green)
-        if (locations.length > 0) {
-          const startLoc = locations[0];
-          if (startLoc && startLoc.latitude && startLoc.longitude) {
-            const startIcon = window.L.divIcon({
-              html: '<div style="background-color: #10b981; width: 24px; height: 24px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 6px rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 12px;">S</div>',
-              className: 'custom-marker',
-              iconSize: [24, 24],
-              iconAnchor: [12, 12]
-            });
+        // Render each track with different colors
+        Object.keys(trackGroups).forEach(trackId => {
+          const trackData = trackGroups[trackId];
+          const locations = trackData.locations.sort((a, b) => a.timestamp - b.timestamp);
+          const trackColor = trackColors[colorIndex % trackColors.length];
+          colorIndex++;
 
-            const startMarker = window.L.marker([startLoc.latitude, startLoc.longitude], { icon: startIcon })
-              .bindPopup(\`
-                <div>
-                  <h4 style="margin: 0 0 8px 0; font-weight: bold;">🏁 Start Point</h4>
+          // Add track polylines
+          if (locations.length > 1) {
+            for (let i = 1; i < locations.length; i++) {
+              const prev = locations[i - 1];
+              const curr = locations[i];
+              
+              if (!prev || !curr || !prev.latitude || !prev.longitude || !curr.latitude || !curr.longitude) {
+                continue;
+              }
+
+              const segment = window.L.polyline([
+                [prev.latitude, prev.longitude],
+                [curr.latitude, curr.longitude]
+              ], {
+                color: trackColor,
+                weight: 4,
+                opacity: 0.8
+              });
+
+              segment.bindPopup(\`
+                <div style="min-width: 200px;">
+                  <h4 style="margin: 0 0 8px 0; font-weight: bold; color: \${trackColor};">\${trackData.name}</h4>
                   <div style="font-size: 12px; line-height: 1.4;">
-                    <div><strong>Time:</strong> \${new Date(startLoc.timestamp).toLocaleString()}</div>
-                    <div><strong>Coordinates:</strong> \${startLoc.latitude.toFixed(6)}, \${startLoc.longitude.toFixed(6)}</div>
-                    <div><strong>Accuracy:</strong> \${startLoc.accuracy ? Math.round(startLoc.accuracy) + 'm' : 'Unknown'}</div>
-                    \${startLoc.altitude ? \`<div><strong>Altitude:</strong> \${Math.round(startLoc.altitude)}m</div>\` : ''}
-                  </div>
-                </div>
-              \`);
-            trackLayerGroup.addLayer(startMarker);
-          }
-        }
-
-        // Add end marker (red arrow) if not tracking and multiple points
-        if (!isTracking && locations.length > 1) {
-          const lastLocation = locations[locations.length - 1];
-          const secondLastLocation = locations[locations.length - 2];
-          
-          if (lastLocation && secondLastLocation && 
-              lastLocation.latitude && lastLocation.longitude &&
-              secondLastLocation.latitude && secondLastLocation.longitude) {
-            
-            const bearing = window.calculateBearing(
-              secondLastLocation.latitude, secondLastLocation.longitude,
-              lastLocation.latitude, lastLocation.longitude
-            );
-
-            const endIcon = window.L.divIcon({
-              html: \`<div style="transform: rotate(\${bearing}deg); width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;">
-                       <svg width="30" height="30" viewBox="0 0 30 30" style="filter: drop-shadow(0 2px 4px rgba(0,0,0,0.4));">
-                         <path d="M15 2 L25 22 L15 18 L5 22 Z" fill="#ef4444" stroke="white" strokeWidth="2"/>
-                       </svg>
-                     </div>\`,
-              className: 'custom-arrow-marker',
-              iconSize: [30, 30],
-              iconAnchor: [15, 15]
-            });
-
-            const endMarker = window.L.marker([lastLocation.latitude, lastLocation.longitude], { icon: endIcon })
-              .bindPopup(\`
-                <div>
-                  <h4 style="margin: 0 0 8px 0; font-weight: bold;">🏁 End Point</h4>
-                  <div style="font-size: 12px; line-height: 1.4;">
-                    <div><strong>Time:</strong> \${new Date(lastLocation.timestamp).toLocaleString()}</div>
-                    <div><strong>Coordinates:</strong> \${lastLocation.latitude.toFixed(6)}, \${lastLocation.longitude.toFixed(6)}</div>
-                    <div><strong>Accuracy:</strong> \${lastLocation.accuracy ? Math.round(lastLocation.accuracy) + 'm' : 'Unknown'}</div>
-                    \${lastLocation.speed ? \`<div><strong>Final Speed:</strong> \${(lastLocation.speed * 3.6).toFixed(1)} km/h</div>\` : ''}
-                    \${lastLocation.altitude ? \`<div><strong>Altitude:</strong> \${Math.round(lastLocation.altitude)}m</div>\` : ''}
-                    <div><strong>Direction:</strong> \${bearing.toFixed(0)}°</div>
-                  </div>
-                </div>
-              \`);
-            trackLayerGroup.addLayer(endMarker);
-          }
-        }
-
-        // Add current location marker (red arrow) during active tracking
-        if (isTracking && currentLocation && locations.length > 1) {
-          const secondLastLocation = locations[locations.length - 2];
-
-          if (secondLastLocation && 
-              currentLocation.latitude && currentLocation.longitude &&
-              secondLastLocation.latitude && secondLastLocation.longitude) {
-            
-            // Calculate bearing for arrow direction
-            const bearing = window.calculateBearing(
-              secondLastLocation.latitude, secondLastLocation.longitude,
-              currentLocation.latitude, currentLocation.longitude
-            );
-
-            // Use the EXACT coordinates from the last location in the locations array
-            // This ensures the arrow is positioned exactly at the end of the track line
-            const lastTrackLocation = locations[locations.length - 1];
-
-            const currentIcon = window.L.divIcon({
-              html: \`<div style="transform: rotate(\${bearing}deg); width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;">
-                       <svg width="32" height="32" viewBox="0 0 32 32" style="filter: drop-shadow(0 3px 6px rgba(0,0,0,0.5));">
-                         <path d="M16 2 L26 24 L16 20 L6 24 Z" fill="#ef4444" stroke="white" strokeWidth="2"/>
-                         <circle cx="16" cy="16" r="3" fill="white" stroke="#ef4444" strokeWidth="1"/>
-                       </svg>
-                     </div>\`,
-              className: 'current-location-marker',
-              iconSize: [32, 32],
-              iconAnchor: [16, 16]
-            });
-
-            // Position the marker at the EXACT end of the track line
-            const currentMarker = window.L.marker([lastTrackLocation.latitude, lastTrackLocation.longitude], { icon: currentIcon })
-              .bindPopup(\`
-                <div>
-                  <h4 style="margin: 0 0 8px 0; font-weight: bold;">📍 Current Position</h4>
-                  <div style="font-size: 12px; line-height: 1.4;">
-                    <div><strong>Time:</strong> \${new Date(lastTrackLocation.timestamp).toLocaleString()}</div>
-                    <div><strong>Coordinates:</strong> \${lastTrackLocation.latitude.toFixed(6)}, \${lastTrackLocation.longitude.toFixed(6)}</div>
-                    <div><strong>Accuracy:</strong> \${lastTrackLocation.accuracy ? Math.round(lastTrackLocation.accuracy) + 'm' : 'Unknown'}</div>
-                    \${lastTrackLocation.speed ? \`<div><strong>Current Speed:</strong> \${(lastTrackLocation.speed * 3.6).toFixed(1)} km/h</div>\` : ''}
-                    \${lastTrackLocation.altitude ? \`<div><strong>Altitude:</strong> \${Math.round(lastTrackLocation.altitude)}m</div>\` : ''}
-                    <div><strong>Direction:</strong> \${bearing.toFixed(0)}°</div>
-                    <div style="margin-top: 8px; padding: 4px; background: #ef4444; color: white; border-radius: 4px; text-align: center; font-weight: bold;">
-                      🔴 RECORDING
+                    <div>
+                      <strong>Time:</strong> \${new Date(prev.timestamp).toLocaleTimeString()} - \${new Date(curr.timestamp).toLocaleTimeString()}
+                    </div>
+                    <div><strong>Speed:</strong> \${((curr.speed || 0) * 3.6).toFixed(1)} km/h</div>
+                    <div>
+                      <strong>Coordinates:</strong> \${curr.latitude.toFixed(6)}, \${curr.longitude.toFixed(6)}
                     </div>
                   </div>
                 </div>
               \`);
-            trackLayerGroup.addLayer(currentMarker);
-          }
-        } else if (isTracking && currentLocation && locations.length === 1) {
-          // For the very first location point during tracking
-          const currentIcon = window.L.divIcon({
-            html: \`<div style="width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;">
-                     <svg width="32" height="32" viewBox="0 0 32 32" style="filter: drop-shadow(0 3px 6px rgba(0,0,0,0.5));">
-                       <circle cx="16" cy="16" r="12" fill="#ef4444" stroke="white" strokeWidth="3"/>
-                       <circle cx="16" cy="16" r="6" fill="white"/>
-                       <circle cx="16" cy="16" r="3" fill="#ef4444"/>
-                     </svg>
-                   </div>\`,
-            className: 'current-location-marker',
-            iconSize: [32, 32],
-            iconAnchor: [16, 16]
-          });
 
-          const currentMarker = window.L.marker([currentLocation.latitude, currentLocation.longitude], { icon: currentIcon })
-            .bindPopup(\`
+              trackLayerGroup.addLayer(segment);
+            }
+
+            // Add start marker
+            const startLoc = locations[0];
+            const startIcon = window.L.divIcon({
+              html: \`<div style="background-color: \${trackColor}; width: 20px; height: 20px; border-radius: 50%; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 10px;">S</div>\`,
+              className: "custom-marker",
+              iconSize: [20, 20],
+              iconAnchor: [10, 10],
+            });
+
+            const startMarker = window.L.marker([startLoc.latitude, startLoc.longitude], { icon: startIcon }).bindPopup(\`
               <div>
-                <h4 style="margin: 0 0 8px 0; font-weight: bold;">🎯 Starting Position</h4>
+                <h4 style="margin: 0 0 8px 0; font-weight: bold; color: \${trackColor};">\${trackData.name} - Start</h4>
                 <div style="font-size: 12px; line-height: 1.4;">
-                  <div><strong>Time:</strong> \${new Date(currentLocation.timestamp).toLocaleString()}</div>
-                  <div><strong>Coordinates:</strong> \${currentLocation.latitude.toFixed(6)}, \${currentLocation.longitude.toFixed(6)}</div>
-                  <div><strong>Accuracy:</strong> \${currentLocation.accuracy ? Math.round(currentLocation.accuracy) + 'm' : 'Unknown'}</div>
-                  \${currentLocation.speed ? \`<div><strong>Current Speed:</strong> \${(currentLocation.speed * 3.6).toFixed(1)} km/h</div>\` : ''}
-                  \${currentLocation.altitude ? \`<div><strong>Altitude:</strong> \${Math.round(currentLocation.altitude)}m</div>\` : ''}
-                  <div style="margin-top: 8px; padding: 4px; background: #ef4444; color: white; border-radius: 4px; text-align: center; font-weight: bold;">
-                    🔴 RECORDING
-                  </div>
+                  <div><strong>Time:</strong> \${new Date(startLoc.timestamp).toLocaleString()}</div>
+                  <div><strong>Coordinates:</strong> \${startLoc.latitude.toFixed(6)}, \${startLoc.longitude.toFixed(6)}</div>
                 </div>
               </div>
             \`);
-          trackLayerGroup.addLayer(currentMarker);
+            trackLayerGroup.addLayer(startMarker);
+
+            // Add end marker with arrow
+            const lastLocation = locations[locations.length - 1];
+            const secondLastLocation = locations[locations.length - 2];
+
+            if (secondLastLocation) {
+              const bearing = window.calculateBearing(
+                secondLastLocation.latitude,
+                secondLastLocation.longitude,
+                lastLocation.latitude,
+                lastLocation.longitude,
+              );
+
+              const endIcon = window.L.divIcon({
+                html: \`<div style="transform: rotate(\${bearing}deg); width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;">
+                       <svg width="24" height="24" viewBox="0 0 24 24" style="filter: drop-shadow(0 2px 4px rgba(0,0,0,0.4));">
+                         <path d="M12 2 L20 18 L12 15 L4 18 Z" fill="\${trackColor}" stroke="white" strokeWidth="1.5"/>
+                       </svg>
+                     </div>\`,
+                className: "custom-arrow-marker",
+                iconSize: [24, 24],
+                iconAnchor: [12, 12],
+              });
+
+              const endMarker = window.L.marker([lastLocation.latitude, lastLocation.longitude], { icon: endIcon }).bindPopup(\`
+                <div>
+                  <h4 style="margin: 0 0 8px 0; font-weight: bold; color: \${trackColor};">\${trackData.name} - End</h4>
+                  <div style="font-size: 12px; line-height: 1.4;">
+                    <div><strong>Time:</strong> \${new Date(lastLocation.timestamp).toLocaleString()}</div>
+                    <div><strong>Coordinates:</strong> \${lastLocation.latitude.toFixed(6)}, \${lastLocation.longitude.toFixed(6)}</div>
+                    <div><strong>Direction:</strong> \${bearing.toFixed(0)}°</div>
+                  </div>
+                </div>
+              \`);
+              trackLayerGroup.addLayer(endMarker);
+            }
+
+            // Collect coordinates for bounds
+            allCoords = allCoords.concat(locations.map((loc) => [loc.latitude, loc.longitude]));
+          }
+        });
+
+        // Fit map to show all tracks
+        if (allCoords.length > 0) {
+          const bounds = window.L.latLngBounds(allCoords);
+          map.fitBounds(bounds, { padding: [20, 20] });
         }
 
       } catch (error) {
-        console.error('Map update error:', error);
+        console.error("Map update error:", error);
         window.showErrorMessage();
       }
     }
 
     // Initialize map when DOM is ready
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', window.initializeMap);
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", window.initializeMap);
     } else {
       window.initializeMap();
     }
   </script>
 </body>
 </html>
-    `
-  }
+    `;
+  };
 
   // Handle messages from WebView
   const handleMessage = (event: any) => {
     try {
-      const data = JSON.parse(event.nativeEvent.data)
+      const data = JSON.parse(event.nativeEvent.data);
 
       if (data.type === "exitFullscreen" && onExitFullscreen) {
-        onExitFullscreen()
+        onExitFullscreen();
       } else if (data.type === "mapReady") {
-        console.log("Map is ready")
-        setIsMapLoaded(true)
+        console.log("Map is ready");
+        setIsMapLoaded(true);
       }
     } catch (error) {
-      console.error("Error parsing WebView message:", error)
+      console.error("Error parsing WebView message:", error);
     }
-  }
+  };
 
   // Handle WebView errors
   const handleError = (syntheticEvent: any) => {
-    const { nativeEvent } = syntheticEvent
-    console.error("WebView error:", nativeEvent)
-  }
+    const { nativeEvent } = syntheticEvent;
+    console.error("WebView error:", nativeEvent);
+  };
 
   const handleHttpError = (syntheticEvent: any) => {
-    const { nativeEvent } = syntheticEvent
-    console.error("WebView HTTP error:", nativeEvent)
-  }
+    const { nativeEvent } = syntheticEvent;
+    console.error("WebView HTTP error:", nativeEvent);
+  };
 
   // Update map data with throttling to prevent excessive updates
-  const lastUpdateRef = useRef(0)
+  const lastUpdateRef = useRef(0);
   useEffect(() => {
-    const now = Date.now()
-    if (isMapLoaded && webViewRef.current && now - lastUpdateRef.current > 1000) {
+    const now = Date.now();
+    if (
+      isMapLoaded &&
+      webViewRef.current &&
+      now - lastUpdateRef.current > 1000
+    ) {
       // Throttle to max 1 update per second
-      lastUpdateRef.current = now
+      lastUpdateRef.current = now;
 
       const updateScript = `
         (function() {
@@ -677,20 +698,20 @@ const MapComponent: React.FC<Props> = ({
           }
         })();
         true;
-      `
+      `;
 
-      webViewRef.current.injectJavaScript(updateScript)
+      webViewRef.current.injectJavaScript(updateScript);
     }
-  }, [locations, currentLocation, isTracking, isMapLoaded])
+  }, [locations, currentLocation, isTracking, isMapLoaded]);
 
   // Only reload for theme changes or fullscreen changes
   useEffect(() => {
     if (webViewRef.current) {
-      console.log("Reloading WebView for theme/fullscreen change")
-      setIsMapLoaded(false)
-      webViewRef.current.reload()
+      console.log("Reloading WebView for theme/fullscreen change");
+      setIsMapLoaded(false);
+      webViewRef.current.reload();
     }
-  }, [isDarkTheme, isFullscreen, showLayerSelector])
+  }, [isDarkTheme, isFullscreen, showLayerSelector]);
 
   return (
     <View style={[styles.container, style]}>
@@ -712,17 +733,18 @@ const MapComponent: React.FC<Props> = ({
         mixedContentMode="compatibility"
         allowsInlineMediaPlayback={true}
         mediaPlaybackRequiresUserAction={false}
+        geolocationEnabled={true}
         onLoadEnd={() => {
-          console.log("WebView load ended")
+          console.log("WebView load ended");
           // Fallback in case message doesn't work
           setTimeout(() => {
             if (!isMapLoaded) {
-              setIsMapLoaded(true)
+              setIsMapLoaded(true);
             }
-          }, 3000)
+          }, 3000);
         }}
         onLoadStart={() => {
-          console.log("WebView load started")
+          console.log("WebView load started");
         }}
         renderError={(errorDomain, errorCode, errorDesc) => (
           <View style={styles.errorContainer}>
@@ -732,8 +754,8 @@ const MapComponent: React.FC<Props> = ({
         )}
       />
     </View>
-  )
-}
+  );
+};
 
 const styles = StyleSheet.create({
   container: {
@@ -760,6 +782,6 @@ const styles = StyleSheet.create({
     color: "#6b7280",
     textAlign: "center",
   },
-})
+});
 
-export default MapComponent
+export default MapComponent;
