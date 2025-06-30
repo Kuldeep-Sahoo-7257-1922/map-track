@@ -1,6 +1,7 @@
 import React from "react"
 import { View, Text, StyleSheet, ScrollView } from "react-native"
 import { Button, Card } from "react-native-paper"
+import { __DEV__ } from "react-native"
 
 interface Props {
   children: React.ReactNode
@@ -42,6 +43,14 @@ class CrashGuard extends React.Component<Props, State> {
         this.handleRetry()
       }, 3000)
     }
+
+    // Log error for debugging
+    console.error("Component crash prevented:", {
+      error: error.message,
+      stack: error.stack,
+      componentStack: errorInfo.componentStack,
+      retryCount: this.state.retryCount,
+    })
   }
 
   componentWillUnmount() {
@@ -55,6 +64,8 @@ class CrashGuard extends React.Component<Props, State> {
       clearTimeout(this.retryTimeout)
       this.retryTimeout = null
     }
+
+    console.log("Retrying component render, attempt:", this.state.retryCount + 1)
 
     this.setState((prevState) => ({
       hasError: false,
@@ -76,7 +87,7 @@ class CrashGuard extends React.Component<Props, State> {
             <Card.Content>
               <Text style={styles.title}>⚠️ Component Error</Text>
               <Text style={styles.message}>
-                A component encountered an error.
+                A component encountered an error and was safely recovered.
                 {this.state.retryCount < 3 ? " Auto-retrying..." : " Please try again manually."}
               </Text>
 
@@ -84,10 +95,13 @@ class CrashGuard extends React.Component<Props, State> {
                 Retry Now ({this.state.retryCount}/3)
               </Button>
 
-              <ScrollView style={styles.errorDetails}>
-                <Text style={styles.errorTitle}>Error Details:</Text>
-                <Text style={styles.errorText}>{this.state.error?.toString()}</Text>
-              </ScrollView>
+              {__DEV__ && (
+                <ScrollView style={styles.errorDetails}>
+                  <Text style={styles.errorTitle}>Error Details (Dev Mode):</Text>
+                  <Text style={styles.errorText}>{this.state.error?.toString()}</Text>
+                  <Text style={styles.errorText}>{this.state.error?.stack}</Text>
+                </ScrollView>
+              )}
             </Card.Content>
           </Card>
         </View>

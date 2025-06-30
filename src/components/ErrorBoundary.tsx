@@ -24,6 +24,7 @@ class ErrorBoundary extends React.Component<Props, State> {
   }
 
   static getDerivedStateFromError(error: Error): State {
+    console.error("ErrorBoundary caught error:", error)
     return {
       hasError: true,
       error,
@@ -33,13 +34,26 @@ class ErrorBoundary extends React.Component<Props, State> {
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
     console.error("Error caught by boundary:", error, errorInfo)
+
+    // Log comprehensive error information
+    console.error("App-level error details:", {
+      message: error.message,
+      stack: error.stack,
+      componentStack: errorInfo.componentStack,
+      timestamp: new Date().toISOString(),
+    })
+
     this.setState({
       error,
       errorInfo,
     })
+
+    // In production, you might want to send this to a crash reporting service
+    // Example: Sentry.captureException(error, { contexts: { react: errorInfo } })
   }
 
   handleReset = () => {
+    console.log("Resetting app from error boundary")
     this.setState({
       hasError: false,
       error: null,
@@ -54,17 +68,31 @@ class ErrorBoundary extends React.Component<Props, State> {
           <Card style={styles.card}>
             <Card.Content>
               <Text style={styles.title}>🚨 App Error</Text>
-              <Text style={styles.message}>The app encountered an error and needs to recover.</Text>
+              <Text style={styles.message}>
+                The app encountered an unexpected error but has been safely recovered. Your location tracking data is
+                preserved.
+              </Text>
 
               <Button mode="contained" onPress={this.handleReset} style={styles.button}>
-                Try Again
+                Restart App
               </Button>
 
               {__DEV__ && this.state.error && (
                 <ScrollView style={styles.errorDetails}>
                   <Text style={styles.errorTitle}>Error Details (Dev Mode):</Text>
                   <Text style={styles.errorText}>{this.state.error.toString()}</Text>
-                  {this.state.errorInfo && <Text style={styles.errorText}>{this.state.errorInfo.componentStack}</Text>}
+                  {this.state.errorInfo && (
+                    <>
+                      <Text style={styles.errorTitle}>Component Stack:</Text>
+                      <Text style={styles.errorText}>{this.state.errorInfo.componentStack}</Text>
+                    </>
+                  )}
+                  {this.state.error.stack && (
+                    <>
+                      <Text style={styles.errorTitle}>Error Stack:</Text>
+                      <Text style={styles.errorText}>{this.state.error.stack}</Text>
+                    </>
+                  )}
                 </ScrollView>
               )}
             </Card.Content>
@@ -101,6 +129,7 @@ const styles = StyleSheet.create({
     textAlign: "center",
     marginBottom: 24,
     color: "#374151",
+    lineHeight: 24,
   },
   button: {
     marginBottom: 16,
@@ -115,12 +144,14 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "bold",
     marginBottom: 8,
+    marginTop: 8,
     color: "#dc2626",
   },
   errorText: {
     fontSize: 12,
     fontFamily: "monospace",
     color: "#374151",
+    lineHeight: 16,
   },
 })
 

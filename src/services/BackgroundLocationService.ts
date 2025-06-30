@@ -1,21 +1,11 @@
 import * as Location from "expo-location"
 import * as TaskManager from "expo-task-manager"
-import * as Notifications from "expo-notifications"
 import { storageUtils } from "../utils/storage"
 import type { LocationPoint } from "../types"
 
 const BACKGROUND_LOCATION_TASK = "background-location-task"
 
-// Configure notifications
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: false,
-    shouldSetBadge: false,
-  }),
-})
-
-// Background location task
+// Background location task with comprehensive error handling
 TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
   if (error) {
     console.error("Background location task error:", error)
@@ -25,7 +15,12 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
   if (data) {
     try {
       const { locations } = data as any
-      console.log("Background location received:", locations.length, "locations")
+      console.log("Background location received:", locations?.length || 0, "locations")
+
+      if (!locations || locations.length === 0) {
+        console.log("No locations received in background task")
+        return
+      }
 
       // Get current tracking info from storage
       const currentTrackInfo = await storageUtils.getCurrentTrackInfo()
@@ -35,33 +30,38 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
         return
       }
 
-      // Process each location
+      // Process each location with error handling
       for (const location of locations) {
-        const locationPoint: LocationPoint = {
-          latitude: location.coords.latitude,
-          longitude: location.coords.longitude,
-          timestamp: Date.now(),
-          accuracy: location.coords.accuracy || undefined,
-          speed: location.coords.speed || undefined,
-          heading: location.coords.heading || undefined,
-          altitude: location.coords.altitude || undefined,
+        try {
+          if (!location?.coords) {
+            console.warn("Invalid location data:", location)
+            continue
+          }
+
+          const locationPoint: LocationPoint = {
+            latitude: location.coords.latitude,
+            longitude: location.coords.longitude,
+            timestamp: Date.now(),
+            accuracy: location.coords.accuracy || undefined,
+            speed: location.coords.speed || undefined,
+            heading: location.coords.heading || undefined,
+            altitude: location.coords.altitude || undefined,
+          }
+
+          // Validate location data
+          if (isNaN(locationPoint.latitude) || isNaN(locationPoint.longitude)) {
+            console.warn("Invalid coordinates:", locationPoint)
+            continue
+          }
+
+          // Save location to current track
+          await storageUtils.addLocationToCurrentTrack(locationPoint)
+        } catch (locationError) {
+          console.error("Error processing individual location:", locationError)
         }
-
-        // Save location to current track
-        await storageUtils.addLocationToCurrentTrack(locationPoint)
       }
 
-      // Get updated track with latest stats for real-time notification
-      const track = await storageUtils.getTrack(currentTrackInfo.trackId)
-      if (track) {
-        // Update notification with real-time data
-        await updateTrackingNotification(
-          track.locations.length,
-          track.totalDistance,
-          currentTrackInfo.trackName,
-          currentTrackInfo.startTime,
-        )
-      }
+      console.log("Background location processed successfully")
     } catch (error) {
       console.error("Error processing background location:", error)
     }
@@ -69,70 +69,77 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
 })
 
 export const BackgroundLocationService = {
-  // Start background location tracking
+  // Start background location tracking with comprehensive error handling
   async startBackgroundLocationTracking(trackId: string, trackName: string): Promise<boolean> {
     try {
       console.log("Starting background location tracking for:", trackName)
 
-      // Request background location permission
-      const { status } = await Location.requestBackgroundPermissionsAsync()
-      if (status !== "granted") {
-        console.error("Background location permission denied")
+      if (!trackId || !trackName) {
+        console.error("Invalid track ID or name")
         return false
       }
 
-      // Request notification permission
-      const { status: notificationStatus } = await Notifications.requestPermissionsAsync()
-      if (notificationStatus !== "granted") {
-        console.warn("Notification permission denied")
+      // Check if already running
+      const isAlreadyRunning = await this.isBackgroundLocationRunning()
+      if (isAlreadyRunning) {
+        console.log("Background location already running")
+        return true
+      }
+
+      // Request background location permission
+      try {
+        const { status } = await Location.requestBackgroundPermissionsAsync()
+        if (status !== "granted") {
+          console.error("Background location permission denied")
+          return false
+        }
+      } catch (permissionError) {
+        console.error("Error requesting background permission:", permissionError)
+        return false
       }
 
       // Save current tracking info
-      await storageUtils.setCurrentTrackInfo({
-        trackId,
-        trackName,
-        isTracking: true,
-        startTime: Date.now(),
-      })
+      try {
+        await storageUtils.setCurrentTrackInfo({
+          trackId,
+          trackName,
+          isTracking: true,
+          startTime: Date.now(),
+        })
+      } catch (storageError) {
+        console.error("Error saving track info:", storageError)
+        return false
+      }
 
-      // Start background location updates with higher frequency
-      await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
-        accuracy: Location.Accuracy.BestForNavigation,
-        timeInterval: 3000, // 3 seconds for more frequent updates
-        distanceInterval: 3, // 3 meters
-        deferredUpdatesInterval: 5000, // 5 seconds
-        foregroundService: {
-          notificationTitle: "🗺️ Location Tracker",
-          notificationBody: `Recording: ${trackName}`,
-          notificationColor: "#ef4444",
-        },
-      })
+      // Start background location updates with conservative settings for better compatibility
+      try {
+        await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
+          accuracy: Location.Accuracy.Balanced, // Use Balanced instead of BestForNavigation for better compatibility
+          timeInterval: 10000, // 10 seconds - more conservative for battery and compatibility
+          distanceInterval: 10, // 10 meters
+          deferredUpdatesInterval: 30000, // 30 seconds
+          showsBackgroundLocationIndicator: true, // Show system indicator
+          pausesLocationUpdatesAutomatically: false, // Don't pause automatically
+          // Remove foregroundService option to let Expo handle it automatically
+        })
+      } catch (locationError) {
+        console.error("Error starting location updates:", locationError)
 
-      // Show initial notification
-      await showTrackingNotification(trackName, 0, 0, Date.now())
-
-      // Set up periodic notification updates every 10 seconds
-      const notificationInterval = setInterval(async () => {
+        // Try with even more conservative settings if first attempt fails
         try {
-          const currentTrackInfo = await storageUtils.getCurrentTrackInfo()
-          if (!currentTrackInfo || !currentTrackInfo.isTracking) {
-            clearInterval(notificationInterval)
-            return
-          }
-
-          const track = await storageUtils.getTrack(currentTrackInfo.trackId)
-          if (track) {
-            await updateTrackingNotification(
-              track.locations.length,
-              track.totalDistance,
-              currentTrackInfo.trackName,
-              currentTrackInfo.startTime,
-            )
-          }
-        } catch (error) {
-          console.error("Error in notification update interval:", error)
+          console.log("Retrying with more conservative settings...")
+          await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
+            accuracy: Location.Accuracy.Low, // Use Low accuracy as fallback
+            timeInterval: 30000, // 30 seconds
+            distanceInterval: 50, // 50 meters
+            showsBackgroundLocationIndicator: true,
+            pausesLocationUpdatesAutomatically: false,
+          })
+        } catch (fallbackError) {
+          console.error("Fallback location settings also failed:", fallbackError)
+          return false
         }
-      }, 10000) // Update every 10 seconds
+      }
 
       console.log("Background location tracking started successfully")
       return true
@@ -142,22 +149,29 @@ export const BackgroundLocationService = {
     }
   },
 
-  // Stop background location tracking
+  // Stop background location tracking with comprehensive cleanup
   async stopBackgroundLocationTracking(): Promise<void> {
     try {
       console.log("Stopping background location tracking")
 
       // Stop location updates
-      const isRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_LOCATION_TASK)
-      if (isRegistered) {
-        await Location.stopLocationUpdatesAsync(BACKGROUND_LOCATION_TASK)
+      try {
+        const isRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_LOCATION_TASK)
+        if (isRegistered) {
+          await Location.stopLocationUpdatesAsync(BACKGROUND_LOCATION_TASK)
+          console.log("Location updates stopped")
+        }
+      } catch (stopError) {
+        console.error("Error stopping location updates:", stopError)
       }
 
       // Clear current tracking info
-      await storageUtils.clearCurrentTrackInfo()
-
-      // Cancel notification
-      await Notifications.cancelAllScheduledNotificationsAsync()
+      try {
+        await storageUtils.clearCurrentTrackInfo()
+        console.log("Tracking info cleared")
+      } catch (clearError) {
+        console.error("Error clearing tracking info:", clearError)
+      }
 
       console.log("Background location tracking stopped")
     } catch (error) {
@@ -165,77 +179,49 @@ export const BackgroundLocationService = {
     }
   },
 
-  // Check if background location is running
+  // Check if background location is running with error handling
   async isBackgroundLocationRunning(): Promise<boolean> {
     try {
       const isRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_LOCATION_TASK)
       const currentTrackInfo = await storageUtils.getCurrentTrackInfo()
-      return isRegistered && currentTrackInfo?.isTracking === true
+      const isRunning = isRegistered && currentTrackInfo?.isTracking === true
+      console.log("Background location running:", isRunning)
+      return isRunning
     } catch (error) {
       console.error("Error checking background location status:", error)
       return false
     }
   },
 
-  // Get current tracking info
+  // Get current tracking info with error handling
   async getCurrentTrackingInfo() {
     try {
-      return await storageUtils.getCurrentTrackInfo()
+      const info = await storageUtils.getCurrentTrackInfo()
+      return info
     } catch (error) {
       console.error("Error getting current tracking info:", error)
       return null
     }
   },
-}
 
-// Show tracking notification with real-time stats
-async function showTrackingNotification(trackName: string, pointCount: number, distance: number, startTime?: number) {
-  try {
-    const distanceText = distance > 1000 ? `${(distance / 1000).toFixed(2)} km` : `${Math.round(distance)} m`
-    const duration = startTime ? Math.floor((Date.now() - startTime) / 1000) : 0
-    const durationText =
-      duration > 3600
-        ? `${Math.floor(duration / 3600)}h ${Math.floor((duration % 3600) / 60)}m`
-        : duration > 60
-          ? `${Math.floor(duration / 60)}m ${duration % 60}s`
-          : `${duration}s`
+  // Health check for background service
+  async healthCheck(): Promise<boolean> {
+    try {
+      const isRunning = await this.isBackgroundLocationRunning()
+      const trackInfo = await this.getCurrentTrackingInfo()
 
-    await Notifications.scheduleNotificationAsync({
-      content: {
-        title: "🗺️ Location Tracker - RECORDING",
-        body: `${trackName}\n📍 ${pointCount} points • 📏 ${distanceText} • ⏱️ ${durationText}`,
-        data: { trackName, pointCount, distance, duration },
-        sticky: true,
-        priority: Notifications.AndroidNotificationPriority.HIGH,
-        categoryIdentifier: "TRACKING",
-      },
-      trigger: null, // Show immediately
-    })
-  } catch (error) {
-    console.error("Error showing notification:", error)
-  }
-}
+      console.log("Background service health check:", {
+        isRunning,
+        hasTrackInfo: !!trackInfo,
+        trackId: trackInfo?.trackId,
+      })
 
-// Update tracking notification with real-time data
-async function updateTrackingNotification(
-  pointCount: number,
-  distance: number,
-  trackName?: string,
-  startTime?: number,
-) {
-  try {
-    const currentTrackInfo = await storageUtils.getCurrentTrackInfo()
-    if (currentTrackInfo) {
-      await showTrackingNotification(
-        trackName || currentTrackInfo.trackName,
-        pointCount,
-        distance,
-        startTime || currentTrackInfo.startTime,
-      )
+      return isRunning && !!trackInfo
+    } catch (error) {
+      console.error("Background service health check failed:", error)
+      return false
     }
-  } catch (error) {
-    console.error("Error updating notification:", error)
-  }
+  },
 }
 
 // Stop background location tracking (exported function)

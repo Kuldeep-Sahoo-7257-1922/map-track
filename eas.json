@@ -7,20 +7,20 @@
     "development": {
       "developmentClient": true,
       "distribution": "internal",
-      "env": {
-        "EXPO_TARGET_ANDROID_SDK_VERSION": "34"
+      "android": {
+        "buildType": "apk"
       }
     },
     "preview": {
       "distribution": "internal",
-      "env": {
-        "EXPO_TARGET_ANDROID_SDK_VERSION": "34"
+      "android": {
+        "buildType": "apk"
       }
     },
     "production": {
       "autoIncrement": true,
-      "env": {
-        "EXPO_TARGET_ANDROID_SDK_VERSION": "34"
+      "android": {
+        "buildType": "apk"
       }
     }
   },
