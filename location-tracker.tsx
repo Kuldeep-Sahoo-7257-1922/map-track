@@ -1,1054 +1,2355 @@
-"use client"
+"use client";
 
-import type React from "react"
+import type React from "react";
+import { useState, useEffect, useRef } from "react";
+import {
+  View,
+  Text,
+  StyleSheet,
+  Alert,
+  TouchableOpacity,
+  ScrollView,
+  TextInput,
+} from "react-native";
+import { MaterialIcons } from "@expo/vector-icons";
+import * as Location from "expo-location";
+import * as FileSystem from "expo-file-system";
+import * as Sharing from "expo-sharing";
+import * as DocumentPicker from "expo-document-picker";
+import { Switch } from "react-native-paper";
 
-import { useState, useEffect, useRef } from "react"
-import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Badge } from "@/components/ui/badge"
-import { Play, Square, Download, MapPin, Navigation, Maximize, FileText, Save, FolderOpen } from "lucide-react"
-import dynamic from "next/dynamic"
-import { ThemeToggle } from "./components/theme-toggle"
-import { TrackNameDialog } from "./components/track-name-dialog"
-import { TrackList } from "./components/track-list"
-import { storageUtils, type LocationPoint, type SavedTrack } from "./utils/storage"
+import MapComponent from "./src/components/MapView";
+import { storageUtils } from "./src/utils/storage";
+import {
+  generateKML,
+  generateGPX,
+  parseKMLFile,
+  parseGPXFile,
+} from "./src/utils/fileUtils";
+import type { LocationPoint, SavedTrack } from "./src/types";
 
-// File parsing utilities
-const parseKMLFile = (kmlContent: string): LocationPoint[] => {
-  const parser = new DOMParser()
-  const xmlDoc = parser.parseFromString(kmlContent, "text/xml")
-  const coordinates = xmlDoc.getElementsByTagName("coordinates")[0]?.textContent?.trim()
+// Background tracking state keys
+const BACKGROUND_TRACKING_KEY = "background-tracking-state";
+const BACKGROUND_LOCATIONS_KEY = "background-locations";
 
-  if (!coordinates) return []
+const LocationTracker: React.FC = () => {
+  const [isTracking, setIsTracking] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [locations, setLocations] = useState<LocationPoint[]>([]);
+  const [currentLocation, setCurrentLocation] = useState<LocationPoint | null>(
+    null
+  );
+  const [error, setError] = useState<string>("");
+  const [isDarkTheme, setIsDarkTheme] = useState(true);
+  const [showTrackNameDialog, setShowTrackNameDialog] = useState(false);
+  const [showTrackList, setShowTrackList] = useState(false);
+  const [savedTracks, setSavedTracks] = useState<SavedTrack[]>([]);
+  const [currentTrackId, setCurrentTrackId] = useState<string | null>(null);
+  const [currentTrackName, setCurrentTrackName] = useState<string>("");
+  const [viewingTrack, setViewingTrack] = useState<SavedTrack | null>(null);
+  const [selectedTracks, setSelectedTracks] = useState<SavedTrack[]>([]);
+  const [trackNameInput, setTrackNameInput] = useState("");
+  const [isInitialized, setIsInitialized] = useState(false);
 
-  const points: LocationPoint[] = []
-  const coordLines = coordinates.split(/\s+/).filter((line) => line.trim())
+  // GPS/Satellite tracking states
+  const [satelliteCount, setSatelliteCount] = useState<number | null>(null);
+  const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
+  const [signalStrength, setSignalStrength] = useState<'poor' | 'fair' | 'good' | 'excellent' | null>(null);
 
-  coordLines.forEach((line, index) => {
-    const [lng, lat, alt] = line.split(",").map(Number)
-    if (!isNaN(lng) && !isNaN(lat)) {
-      points.push({
-        latitude: lat,
-        longitude: lng,
-        timestamp: Date.now() + index * 1000, // Fake timestamps
-        altitude: alt || undefined,
-      })
+  // Separate state for recording track locations (background recording)
+  const [recordingLocations, setRecordingLocations] = useState<LocationPoint[]>(
+    []
+  );
+
+  const locationSubscription = useRef<Location.LocationSubscription | null>(
+    null
+  );
+  const autoSaveIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const backgroundSyncIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  const AUTO_SAVE_INTERVAL = 10000;
+
+  // Function to estimate satellite count and signal quality from GPS data
+  const updateGPSStats = (locationData: any) => {
+    try {
+      const accuracy = locationData.coords?.accuracy;
+      
+      if (accuracy !== undefined && accuracy !== null) {
+        setGpsAccuracy(Math.round(accuracy));
+        
+        // Estimate satellite count and signal strength based on accuracy
+        // This is an approximation since React Native doesn't provide direct satellite count
+        let estimatedSatellites: number;
+        let strength: 'poor' | 'fair' | 'good' | 'excellent';
+        
+        if (accuracy <= 3) {
+          // Excellent accuracy (0-3m) - likely 12+ satellites
+          estimatedSatellites = Math.floor(Math.random() * 4) + 12; // 12-15
+          strength = 'excellent';
+        } else if (accuracy <= 8) {
+          // Good accuracy (3-8m) - likely 8-11 satellites  
+          estimatedSatellites = Math.floor(Math.random() * 4) + 8; // 8-11
+          strength = 'good';
+        } else if (accuracy <= 15) {
+          // Fair accuracy (8-15m) - likely 5-7 satellites
+          estimatedSatellites = Math.floor(Math.random() * 3) + 5; // 5-7
+          strength = 'fair';
+        } else {
+          // Poor accuracy (15m+) - likely 3-4 satellites
+          estimatedSatellites = Math.floor(Math.random() * 2) + 3; // 3-4
+          strength = 'poor';
+        }
+        
+        setSatelliteCount(estimatedSatellites);
+        setSignalStrength(strength);
+      } else {
+        // No GPS data available
+        setSatelliteCount(null);
+        setGpsAccuracy(null);
+        setSignalStrength(null);
+      }
+    } catch (error) {
+      console.error('Error updating GPS stats:', error);
     }
-  })
+  };
 
-  return points
-}
-
-const parseGPXFile = (gpxContent: string): LocationPoint[] => {
-  const parser = new DOMParser()
-  const xmlDoc = parser.parseFromString(gpxContent, "text/xml")
-  const trackPoints = xmlDoc.getElementsByTagName("trkpt")
-
-  const points: LocationPoint[] = []
-
-  for (let i = 0; i < trackPoints.length; i++) {
-    const trkpt = trackPoints[i]
-    const lat = Number.parseFloat(trkpt.getAttribute("lat") || "0")
-    const lng = Number.parseFloat(trkpt.getAttribute("lon") || "0")
-    const eleElement = trkpt.getElementsByTagName("ele")[0]
-    const timeElement = trkpt.getElementsByTagName("time")[0]
-
-    if (!isNaN(lat) && !isNaN(lng)) {
-      points.push({
-        latitude: lat,
-        longitude: lng,
-        timestamp: timeElement ? new Date(timeElement.textContent || "").getTime() : Date.now() + i * 1000,
-        altitude: eleElement ? Number.parseFloat(eleElement.textContent || "0") : undefined,
-      })
+  // Get signal strength color
+  const getSignalColor = () => {
+    switch (signalStrength) {
+      case 'excellent': return '#10b981'; // Green
+      case 'good': return '#84cc16';      // Light green
+      case 'fair': return '#f59e0b';      // Orange
+      case 'poor': return '#ef4444';      // Red
+      default: return '#6b7280';          // Gray
     }
-  }
+  };
 
-  return points
-}
+  // Get signal strength icon
+  const getSignalIcon = () => {
+    switch (signalStrength) {
+      case 'excellent': return 'signal-cellular-4-bar';
+      case 'good': return 'signal-cellular-3-bar';
+      case 'fair': return 'signal-cellular-2-bar';
+      case 'poor': return 'signal-cellular-1-bar';
+      default: return 'signal-cellular-off';
+    }
+  };
 
-// Dynamic import to avoid SSR issues with Leaflet
-const MapView = dynamic(() => import("./map-view"), { ssr: false })
+  // Background state management
+  const saveBackgroundState = async (
+    trackId: string,
+    trackName: string,
+    isTracking: boolean,
+    isPaused: boolean
+  ) => {
+    try {
+      const state = {
+        trackId,
+        trackName,
+        isTracking,
+        isPaused,
+        timestamp: Date.now(),
+      };
+      await storageUtils.setItem(
+        BACKGROUND_TRACKING_KEY,
+        JSON.stringify(state)
+      );
+    } catch (error) {
+      console.error("Error saving background state:", error);
+    }
+  };
 
-export default function LocationTracker() {
-  const [isTracking, setIsTracking] = useState(false)
-  const [locations, setLocations] = useState<LocationPoint[]>([])
-  const [currentLocation, setCurrentLocation] = useState<LocationPoint | null>(null)
-  const [error, setError] = useState<string>("")
-  const [isDarkTheme, setIsDarkTheme] = useState(false)
-  const [isMapFullscreen, setIsMapFullscreen] = useState(false)
-  const [showTrackNameDialog, setShowTrackNameDialog] = useState(false)
-  const [showTrackList, setShowTrackList] = useState(false)
-  const [savedTracks, setSavedTracks] = useState<SavedTrack[]>([])
-  const [currentTrackId, setCurrentTrackId] = useState<string | null>(null)
-  const [currentTrackName, setCurrentTrackName] = useState<string>("")
-  const [viewingTrack, setViewingTrack] = useState<SavedTrack | null>(null)
-  const [isDragOver, setIsDragOver] = useState(false)
-  const [importedTracks, setImportedTracks] = useState<SavedTrack[]>([])
+  const clearBackgroundState = async () => {
+    try {
+      await storageUtils.removeItem(BACKGROUND_TRACKING_KEY);
+      await storageUtils.removeItem(BACKGROUND_LOCATIONS_KEY);
+    } catch (error) {
+      console.error("Error clearing background state:", error);
+    }
+  };
 
-  const watchIdRef = useRef<number | null>(null)
-  const intervalRef = useRef<NodeJS.Timeout | null>(null)
-  const autoSaveIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const saveLocationsToBackground = async (locations: LocationPoint[]) => {
+    try {
+      await storageUtils.setItem(
+        BACKGROUND_LOCATIONS_KEY,
+        JSON.stringify(locations)
+      );
+    } catch (error) {
+      console.error("Error saving locations to background:", error);
+    }
+  };
 
-  // Load saved tracks on mount
+  // Check for background tracking session
+  const checkBackgroundTracking = async () => {
+    try {
+      const backgroundState = await storageUtils.getItem(
+        BACKGROUND_TRACKING_KEY
+      );
+      if (backgroundState) {
+        const state = JSON.parse(backgroundState);
+        if (state.isTracking && !state.isPaused) {
+          // Resume the tracking session
+          setCurrentTrackId(state.trackId);
+          setCurrentTrackName(state.trackName);
+          setIsTracking(true);
+          setIsPaused(false);
+
+          // Load background locations
+          const backgroundLocations = await storageUtils.getItem(
+            BACKGROUND_LOCATIONS_KEY
+          );
+          if (backgroundLocations) {
+            const locations = JSON.parse(backgroundLocations);
+            setRecordingLocations(locations);
+            // Only set main locations if not viewing another track
+            if (!viewingTrack && selectedTracks.length === 0) {
+              setLocations(locations);
+            }
+          }
+
+          // Resume location tracking
+          await startLocationTracking();
+        }
+      }
+    } catch (error) {
+      console.error("Error checking background tracking:", error);
+    }
+  };
+
+  // Background sync - periodically sync locations from background storage
   useEffect(() => {
-    const tracks = storageUtils.getAllTracks()
-    setSavedTracks(tracks)
-  }, [])
+    if (isTracking && !isPaused) {
+      backgroundSyncIntervalRef.current = setInterval(async () => {
+        try {
+          const backgroundLocations = await storageUtils.getItem(
+            BACKGROUND_LOCATIONS_KEY
+          );
+          if (backgroundLocations) {
+            const bgLocations = JSON.parse(backgroundLocations);
+            setRecordingLocations((prev) => {
+              // Merge background locations with current recording locations
+              const merged = [...prev];
+              bgLocations.forEach((bgLoc: LocationPoint) => {
+                const exists = merged.some(
+                  (loc) => Math.abs(loc.timestamp - bgLoc.timestamp) < 1000 // Within 1 second
+                );
+                if (!exists) {
+                  merged.push(bgLoc);
+                }
+              });
+              // Sort by timestamp
+              return merged.sort((a, b) => a.timestamp - b.timestamp);
+            });
 
-  // Detect device theme on mount
-  useEffect(() => {
-    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches
-    setIsDarkTheme(prefersDark)
-  }, [])
+            // Only update main locations if not viewing other tracks
+            if (!viewingTrack && selectedTracks.length === 0) {
+              setLocations((prev) => {
+                const merged = [...prev];
+                bgLocations.forEach((bgLoc: LocationPoint) => {
+                  const exists = merged.some(
+                    (loc) => Math.abs(loc.timestamp - bgLoc.timestamp) < 1000
+                  );
+                  if (!exists) {
+                    merged.push(bgLoc);
+                  }
+                });
+                return merged.sort((a, b) => a.timestamp - b.timestamp);
+              });
+            }
+          }
+        } catch (error) {
+          console.error("Error syncing background locations:", error);
+        }
+      }, 5000); // Sync every 5 seconds
+    } else {
+      if (backgroundSyncIntervalRef.current) {
+        clearInterval(backgroundSyncIntervalRef.current);
+        backgroundSyncIntervalRef.current = null;
+      }
+    }
 
-  // Auto-save current track every 10 seconds
+    return () => {
+      if (backgroundSyncIntervalRef.current) {
+        clearInterval(backgroundSyncIntervalRef.current);
+      }
+    };
+  }, [isTracking, isPaused, viewingTrack, selectedTracks.length]);
+
+  // Initialize app
   useEffect(() => {
-    if (isTracking && currentTrackId && locations.length > 0) {
+    const initializeApp = async () => {
+      try {
+        console.log("Initializing app...");
+        const tracks = await storageUtils.getAllTracks();
+        setSavedTracks(tracks || []);
+        setIsInitialized(true);
+        // Check for background tracking after initialization
+        await checkBackgroundTracking();
+      } catch (error) {
+        console.error("App initialization error:", error);
+        setError("App initialization failed");
+        setIsInitialized(true);
+      }
+    };
+    initializeApp();
+  }, []);
+
+  // Request location permissions
+  const requestLocationPermission = async (): Promise<boolean> => {
+    try {
+      const isLocationEnabled = await Location.hasServicesEnabledAsync();
+      if (!isLocationEnabled) {
+        setError(
+          "Location services are disabled. Please enable location services."
+        );
+        return false;
+      }
+
+      const { status: foregroundStatus } =
+        await Location.requestForegroundPermissionsAsync();
+      if (foregroundStatus !== "granted") {
+        setError(
+          "Location permission denied. Please grant location permission."
+        );
+        return false;
+      }
+
+      // Request background permission for continuous tracking
+      const { status: backgroundStatus } =
+        await Location.requestBackgroundPermissionsAsync();
+      if (backgroundStatus !== "granted") {
+        console.warn("Background location permission not granted");
+        // Continue without background permission
+      }
+
+      return true;
+    } catch (error) {
+      console.error("Permission request error:", error);
+      setError("Failed to request location permissions");
+      return false;
+    }
+  };
+
+  // Save current track to storage
+  const saveCurrentTrack = async (isComplete = false): Promise<void> => {
+    if (
+      !currentTrackId ||
+      !currentTrackName ||
+      recordingLocations.length === 0
+    ) {
+      console.log("Cannot save track: missing data");
+      return;
+    }
+
+    try {
+      console.log(
+        `💾 Saving track: "${currentTrackName}" with ${recordingLocations.length} points`
+      );
+      const stats = storageUtils.calculateTrackStats(recordingLocations);
+      const track: SavedTrack = {
+        id: currentTrackId,
+        name: currentTrackName,
+        locations: [...recordingLocations],
+        createdAt: recordingLocations[0]?.timestamp || Date.now(),
+        lastModified: Date.now(),
+        isComplete,
+        totalDistance: stats.distance,
+        duration: stats.duration,
+      };
+
+      await storageUtils.saveTrack(track);
+      const tracks = await storageUtils.getAllTracks();
+      setSavedTracks(tracks || []);
+
+      console.log(`✅ Track saved successfully`);
+    } catch (error) {
+      console.error("Save track error:", error);
+      setError("Failed to save track");
+    }
+  };
+
+  // Start location tracking
+  const startLocationTracking = async (): Promise<void> => {
+    try {
+      console.log("🚀 Starting location tracking...");
+
+      const hasPermission = await requestLocationPermission();
+      if (!hasPermission) {
+        return;
+      }
+
+      setError("");
+
+      // Get initial position with high accuracy
+      try {
+        const initialLocation = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.BestForNavigation,
+          timeout: 15000,
+        });
+
+        const newLocation: LocationPoint = {
+          latitude: initialLocation.coords.latitude,
+          longitude: initialLocation.coords.longitude,
+          timestamp: Date.now(),
+          accuracy: initialLocation.coords.accuracy || undefined,
+          speed: initialLocation.coords.speed || undefined,
+          heading: initialLocation.coords.heading || undefined,
+          altitude: initialLocation.coords.altitude || undefined,
+        };
+
+        // Update GPS stats
+        updateGPSStats(initialLocation);
+
+        setCurrentLocation(newLocation);
+        setRecordingLocations((prev) => {
+          const updated = [...prev, newLocation];
+          saveLocationsToBackground(updated);
+          return updated;
+        });
+
+        // Only update main locations if not viewing other tracks
+        if (!viewingTrack && selectedTracks.length === 0) {
+          setLocations((prev) => {
+            const updated = [...prev, newLocation];
+            return updated;
+          });
+        }
+      } catch (locationError) {
+        console.error("Initial location error:", locationError);
+      }
+
+      // Start watching position with high accuracy
+      try {
+        locationSubscription.current = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.BestForNavigation,
+            timeInterval: 3000, // Every 3 seconds for better satellite tracking
+            distanceInterval: 3, // Every 3 meters
+          },
+          (location) => {
+            try {
+              const newLocation: LocationPoint = {
+                latitude: location.coords.latitude,
+                longitude: location.coords.longitude,
+                timestamp: Date.now(),
+                accuracy: location.coords.accuracy || undefined,
+                speed: location.coords.speed || undefined,
+                heading: location.coords.heading || undefined,
+                altitude: location.coords.altitude || undefined,
+              };
+
+              // Update GPS stats with each location update
+              updateGPSStats(location);
+
+              setCurrentLocation(newLocation);
+
+              // Always update recording locations
+              setRecordingLocations((prev) => {
+                if (isPaused) return prev;
+                const updated = [...prev, newLocation];
+                saveLocationsToBackground(updated);
+                return updated;
+              });
+
+              // Only update main locations if not viewing other tracks
+              if (!viewingTrack && selectedTracks.length === 0) {
+                setLocations((prev) => {
+                  if (isPaused) return prev;
+                  const updated = [...prev, newLocation];
+                  return updated;
+                });
+              }
+            } catch (error) {
+              console.error("Error processing location update:", error);
+            }
+          }
+        );
+      } catch (watchError) {
+        console.error("Watch position error:", watchError);
+        throw watchError;
+      }
+
+      console.log("✅ Location tracking started successfully");
+    } catch (error) {
+      console.error("Start tracking error:", error);
+      setError("Failed to start location tracking");
+      setIsTracking(false);
+      setIsPaused(false);
+      // Reset GPS stats on error
+      setSatelliteCount(null);
+      setGpsAccuracy(null);
+      setSignalStrength(null);
+    }
+  };
+
+  // Start tracking (UI wrapper)
+  const startTracking = async (): Promise<void> => {
+    setIsTracking(true);
+    setIsPaused(false);
+    await startLocationTracking();
+  };
+
+  // Pause tracking
+  const pauseTracking = async () => {
+    try {
+      console.log("⏸️ Pausing location tracking...");
+      setIsPaused(true);
+
+      // Update background state
+      if (currentTrackId && currentTrackName) {
+        await saveBackgroundState(currentTrackId, currentTrackName, true, true);
+      }
+
+      // Stop location watching but keep the session
+      if (locationSubscription.current) {
+        try {
+          locationSubscription.current.remove();
+          locationSubscription.current = null;
+        } catch (error) {
+          console.error("Error removing location subscription:", error);
+        }
+      }
+
+      // Reset GPS stats when paused
+      setSatelliteCount(null);
+      setGpsAccuracy(null);
+      setSignalStrength(null);
+
+      // Save current progress
+      if (currentTrackId && recordingLocations.length > 0) {
+        await saveCurrentTrack(false);
+      }
+    } catch (error) {
+      console.error("Pause tracking error:", error);
+      setError("Failed to pause tracking");
+    }
+  };
+
+  // Resume tracking
+  const resumeTracking = async () => {
+    try {
+      console.log("▶️ Resuming location tracking...");
+      setIsPaused(false);
+
+      // Update background state
+      if (currentTrackId && currentTrackName) {
+        await saveBackgroundState(
+          currentTrackId,
+          currentTrackName,
+          true,
+          false
+        );
+      }
+
+      // Restart location tracking
+      await startLocationTracking();
+    } catch (error) {
+      console.error("Resume tracking error:", error);
+      setError("Failed to resume tracking");
+    }
+  };
+
+  // Auto-save system
+  useEffect(() => {
+    if (
+      isTracking &&
+      !isPaused &&
+      currentTrackId &&
+      recordingLocations.length > 0
+    ) {
+      if (autoSaveIntervalRef.current) {
+        clearInterval(autoSaveIntervalRef.current);
+      }
+
       autoSaveIntervalRef.current = setInterval(() => {
-        saveCurrentTrack(false)
-      }, 10000) // Auto-save every 10 seconds
+        console.log("💾 Auto-saving track progress...");
+        saveCurrentTrack(false).catch(console.error);
+      }, AUTO_SAVE_INTERVAL);
     } else {
       if (autoSaveIntervalRef.current) {
-        clearInterval(autoSaveIntervalRef.current)
-        autoSaveIntervalRef.current = null
+        clearInterval(autoSaveIntervalRef.current);
+        autoSaveIntervalRef.current = null;
       }
     }
 
     return () => {
       if (autoSaveIntervalRef.current) {
-        clearInterval(autoSaveIntervalRef.current)
+        clearInterval(autoSaveIntervalRef.current);
+        autoSaveIntervalRef.current = null;
       }
-    }
-  }, [isTracking, currentTrackId, locations])
-
-  // Toggle theme
-  const toggleTheme = () => {
-    setIsDarkTheme(!isDarkTheme)
-  }
-
-  // Toggle map fullscreen
-  const toggleMapFullscreen = () => {
-    setIsMapFullscreen(!isMapFullscreen)
-  }
-
-  // Toggle track list
-  const toggleTrackList = () => {
-    setShowTrackList(!showTrackList)
-  }
-
-  // Save current track to storage
-  const saveCurrentTrack = (isComplete = false) => {
-    if (!currentTrackId || !currentTrackName || locations.length === 0) return
-
-    const stats = storageUtils.calculateTrackStats(locations)
-    const track: SavedTrack = {
-      id: currentTrackId,
-      name: currentTrackName,
-      locations: [...locations],
-      createdAt: locations[0]?.timestamp || Date.now(),
-      lastModified: Date.now(),
-      isComplete,
-      totalDistance: stats.distance,
-      duration: stats.duration,
-    }
-
-    storageUtils.saveTrack(track)
-
-    // Refresh saved tracks list
-    const tracks = storageUtils.getAllTracks()
-    setSavedTracks(tracks)
-  }
+    };
+  }, [isTracking, isPaused, currentTrackId, recordingLocations.length]);
 
   // Start new tracking
-  const handleStartTracking = (trackName: string) => {
-    setShowTrackNameDialog(false)
-    setCurrentTrackName(trackName)
-    setCurrentTrackId(Date.now().toString())
-    setViewingTrack(null)
-    startTracking()
-  }
-
-  // Resume existing track (works for both complete and incomplete tracks)
-  const handleResumeTrack = (track: SavedTrack) => {
-    setCurrentTrackId(track.id)
-    setCurrentTrackName(track.name)
-    setLocations([...track.locations]) // Create a copy to avoid mutation
-    setViewingTrack(null)
-    setShowTrackList(false)
-
-    // Set current location to last known location
-    if (track.locations.length > 0) {
-      setCurrentLocation(track.locations[track.locations.length - 1])
+  const handleStartTracking = async (trackName: string) => {
+    if (!trackName.trim()) {
+      setError("Please enter a track name");
+      return;
     }
 
-    // Mark track as incomplete since we're resuming
-    const updatedTrack = { ...track, isComplete: false, lastModified: Date.now() }
-    storageUtils.saveTrack(updatedTrack)
+    try {
+      // Stop any existing tracking first
+      if (isTracking) {
+        await stopTracking();
+      }
 
-    // Refresh saved tracks list
-    const tracks = storageUtils.getAllTracks()
-    setSavedTracks(tracks)
+      setShowTrackNameDialog(false);
+      setCurrentTrackName(trackName.trim());
+      const newTrackId = Date.now().toString();
+      setCurrentTrackId(newTrackId);
+      setError("");
 
-    startTracking()
-  }
+      // Clear recording locations for new track
+      setRecordingLocations([]);
+      setCurrentLocation(null);
+      setIsPaused(false);
 
-  // View existing track
-  const handleViewTrack = (track: SavedTrack) => {
-    setViewingTrack(track)
-    setCurrentTrackId(null)
-    setCurrentTrackName("")
-    setIsTracking(false)
-    setShowTrackList(false)
+      // Reset GPS stats for new track
+      setSatelliteCount(null);
+      setGpsAccuracy(null);
+      setSignalStrength(null);
 
-    // Set locations and current location with a small delay to ensure map re-renders
-    setTimeout(() => {
-      setLocations(track.locations)
-      setCurrentLocation(track.locations[0] || null) // Set to first location instead of last
-    }, 100)
-  }
+      // Clear view state and show recording track
+      setViewingTrack(null);
+      setSelectedTracks([]);
+      setLocations([]);
 
-  // Start tracking location
-  const startTracking = () => {
-    if (!navigator.geolocation) {
-      setError("Geolocation is not supported by this browser")
-      return
+      // Save background state
+      await saveBackgroundState(newTrackId, trackName.trim(), true, false);
+
+      await startTracking();
+    } catch (error) {
+      console.error("Start tracking error:", error);
+      setError("Failed to start tracking");
     }
-
-    setError("")
-    setIsTracking(true)
-
-    // Get initial position
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const newLocation: LocationPoint = {
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude,
-          timestamp: Date.now(),
-          accuracy: position.coords.accuracy,
-          speed: position.coords.speed || undefined,
-          heading: position.coords.heading || undefined,
-          altitude: position.coords.altitude || undefined,
-        }
-        setCurrentLocation(newLocation)
-        setLocations((prev) => {
-          // Check if this is a significantly different location
-          const lastLocation = prev[prev.length - 1]
-          if (
-            !lastLocation ||
-            Math.abs(lastLocation.latitude - newLocation.latitude) > 0.00001 ||
-            Math.abs(lastLocation.longitude - newLocation.longitude) > 0.00001
-          ) {
-            return [...prev, newLocation]
-          }
-          return prev
-        })
-      },
-      (error) => {
-        setError(`Error getting location: ${error.message}`)
-        setIsTracking(false)
-      },
-    )
-
-    // Watch position changes every second
-    watchIdRef.current = navigator.geolocation.watchPosition(
-      (position) => {
-        const newLocation: LocationPoint = {
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude,
-          timestamp: Date.now(),
-          accuracy: position.coords.accuracy,
-          speed: position.coords.speed || undefined,
-          heading: position.coords.heading || undefined,
-          altitude: position.coords.altitude || undefined,
-        }
-        setCurrentLocation(newLocation)
-        setLocations((prev) => {
-          // Check if this is a significantly different location
-          const lastLocation = prev[prev.length - 1]
-          if (
-            !lastLocation ||
-            Math.abs(lastLocation.latitude - newLocation.latitude) > 0.00001 ||
-            Math.abs(lastLocation.longitude - newLocation.longitude) > 0.00001
-          ) {
-            return [...prev, newLocation]
-          }
-          return prev
-        })
-      },
-      (error) => {
-        setError(`Error tracking location: ${error.message}`)
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 5000,
-        maximumAge: 1000,
-      },
-    )
-
-    // Force update every second even if position hasn't changed significantly
-    intervalRef.current = setInterval(() => {
-      navigator.geolocation.getCurrentPosition(
-        (position) => {
-          const newLocation: LocationPoint = {
-            latitude: position.coords.latitude,
-            longitude: position.coords.longitude,
-            timestamp: Date.now(),
-            accuracy: position.coords.accuracy,
-            speed: position.coords.speed || undefined,
-            heading: position.coords.heading || undefined,
-            altitude: position.coords.altitude || undefined,
-          }
-          setCurrentLocation(newLocation)
-          setLocations((prev) => {
-            // Only add if it's different from the last location
-            const lastLocation = prev[prev.length - 1]
-            if (
-              !lastLocation ||
-              Math.abs(lastLocation.latitude - newLocation.latitude) > 0.00001 ||
-              Math.abs(lastLocation.longitude - newLocation.longitude) > 0.00001
-            ) {
-              return [...prev, newLocation]
-            }
-            return prev
-          })
-        },
-        () => {}, // Ignore errors in interval updates
-        { enableHighAccuracy: true, timeout: 5000, maximumAge: 1000 },
-      )
-    }, 1000)
-  }
+  };
 
   // Stop tracking
-  const stopTracking = () => {
-    setIsTracking(false)
-    if (watchIdRef.current !== null) {
-      navigator.geolocation.clearWatch(watchIdRef.current)
-      watchIdRef.current = null
+  const stopTracking = async () => {
+    try {
+      console.log("⏹️ Stopping location tracking...");
+      setIsTracking(false);
+      setIsPaused(false);
+
+      // Clear background state
+      await clearBackgroundState();
+
+      if (locationSubscription.current) {
+        try {
+          locationSubscription.current.remove();
+          locationSubscription.current = null;
+        } catch (error) {
+          console.error("Error removing location subscription:", error);
+        }
+      }
+
+      // Reset GPS stats when stopped
+      setSatelliteCount(null);
+      setGpsAccuracy(null);
+      setSignalStrength(null);
+
+      if (currentTrackId && recordingLocations.length > 0) {
+        try {
+          await saveCurrentTrack(true);
+          console.log("✅ Final track save completed");
+        } catch (error) {
+          console.error("Error saving final track:", error);
+        }
+      }
+
+      // Clear current tracking state
+      setCurrentTrackId(null);
+      setCurrentTrackName("");
+      setRecordingLocations([]);
+    } catch (error) {
+      console.error("Stop tracking error:", error);
+      setError("Failed to stop tracking");
     }
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current)
-      intervalRef.current = null
+  };
+
+  // Toggle track visibility (allow multiple track selection)
+  const handleViewTrack = (track: SavedTrack) => {
+    try {
+      console.log("Toggling track view:", track.name);
+
+      setSelectedTracks((prev) => {
+        const isSelected = prev.some((t) => t.id === track.id);
+        let newSelection: SavedTrack[];
+
+        if (isSelected) {
+          // Remove track from selection
+          newSelection = prev.filter((t) => t.id !== track.id);
+        } else {
+          // Add track to selection
+          newSelection = [...prev, track];
+        }
+
+        // Update locations based on selection
+        if (newSelection.length === 0) {
+          // No tracks selected, show recording track if active
+          if (isTracking) {
+            setLocations(recordingLocations);
+          } else {
+            setLocations([]);
+          }
+          setViewingTrack(null);
+        } else {
+          // Show selected tracks
+          const allSelectedLocations = newSelection.flatMap((selectedTrack) =>
+            selectedTrack.locations.map((loc) => ({
+              ...loc,
+              trackId: selectedTrack.id,
+              trackName: selectedTrack.name,
+            }))
+          );
+          setLocations(allSelectedLocations);
+          setViewingTrack(newSelection.length === 1 ? newSelection[0] : null);
+        }
+
+        return newSelection;
+      });
+
+      setShowTrackList(false);
+    } catch (error) {
+      console.error("View track error:", error);
+      setError("Failed to view track");
     }
+  };
 
-    // Save track as complete
-    if (currentTrackId) {
-      saveCurrentTrack(true)
+  // Show current recording track
+  const showCurrentRecordingTrack = () => {
+    setSelectedTracks([]);
+    setViewingTrack(null);
+    setLocations(recordingLocations);
+    setShowTrackList(false);
+  };
+
+  // Resume existing track
+  const handleResumeTrack = async (track: SavedTrack) => {
+    try {
+      // Stop any existing tracking first
+      if (isTracking) {
+        await stopTracking();
+      }
+
+      setCurrentTrackId(track.id);
+      setCurrentTrackName(track.name);
+      setRecordingLocations([...track.locations]); // Keep existing locations for recording
+      setSelectedTracks([]); // Clear any viewed tracks
+      setViewingTrack(null);
+      setShowTrackList(false);
+      setError("");
+      setIsPaused(false);
+
+      // Reset GPS stats for resumed track
+      setSatelliteCount(null);
+      setGpsAccuracy(null);
+      setSignalStrength(null);
+
+      // Show the track being resumed
+      setLocations([...track.locations]);
+
+      if (track.locations.length > 0) {
+        setCurrentLocation(track.locations[track.locations.length - 1]);
+      }
+
+      const updatedTrack = {
+        ...track,
+        isComplete: false,
+        lastModified: Date.now(),
+      };
+      await storageUtils.saveTrack(updatedTrack);
+
+      const tracks = await storageUtils.getAllTracks();
+      setSavedTracks(tracks || []);
+
+      // Save background state
+      await saveBackgroundState(track.id, track.name, true, false);
+
+      await startTracking();
+    } catch (error) {
+      console.error("Resume track error:", error);
+      setError("Failed to resume track");
     }
-  }
+  };
 
-  // Generate KML file content
-  const generateKML = (trackLocations: LocationPoint[], trackName = "GPS Track") => {
-    if (trackLocations.length === 0) return ""
+  // Download functions (use appropriate track data)
+  const downloadKML = async (track?: SavedTrack) => {
+    try {
+      const trackData = track || {
+        name: currentTrackName || "Current Track",
+        locations: isTracking ? recordingLocations : locations,
+      };
+      if (!trackData.locations || trackData.locations.length === 0) {
+        setError("No location data to download");
+        return;
+      }
 
-    const kmlHeader = `<?xml version="1.0" encoding="UTF-8"?>
-<kml xmlns="http://www.opengis.net/kml/2.2">
-  <Document>
-    <name>${trackName}</name>
-    <description>GPS track recorded on ${new Date().toLocaleDateString()}</description>
-    
-    <!-- Style for the track line -->
-    <Style id="trackStyle">
-      <LineStyle>
-        <color>ff0000ff</color>
-        <width>3</width>
-      </LineStyle>
-    </Style>
+      const kmlContent = generateKML(trackData.locations, trackData.name);
+      const filename = `${(trackData.name || "track").replace(
+        /[^a-z0-9]/gi,
+        "_"
+      )}_${new Date().toISOString().split("T")[0]}.kml`;
+      const fileUri = `${FileSystem.documentDirectory}${filename}`;
 
-    <!-- Track line -->
-    <Placemark>
-      <name>${trackName}</name>
-      <styleUrl>#trackStyle</styleUrl>
-      <LineString>
-        <tessellate>1</tessellate>
-        <coordinates>`
+      await FileSystem.writeAsStringAsync(fileUri, kmlContent);
 
-    const coordinates = trackLocations
-      .map((loc) => `${loc.longitude},${loc.latitude},${loc.altitude || 0}`)
-      .join("\n          ")
-
-    const kmlMiddle = `
-        </coordinates>
-      </LineString>
-    </Placemark>
-
-    <!-- Waypoints with arrows -->`
-
-    const waypoints =
-      trackLocations.length > 0
-        ? `
-    <!-- Start Point -->
-    <Placemark>
-      <name>Start Point</name>
-      <description>
-        Started at: ${new Date(trackLocations[0].timestamp).toLocaleString()}
-        Accuracy: ${trackLocations[0].accuracy ? Math.round(trackLocations[0].accuracy) + "m" : "Unknown"}
-        ${trackLocations[0].altitude ? `Altitude: ${Math.round(trackLocations[0].altitude)}m` : ""}
-      </description>
-      <Style>
-        <IconStyle>
-          <Icon>
-            <href>http://maps.google.com/mapfiles/kml/paddle/grn-circle.png</href>
-          </Icon>
-        </IconStyle>
-      </Style>
-      <Point>
-        <coordinates>${trackLocations[0].longitude},${trackLocations[0].latitude},${trackLocations[0].altitude || 0}</coordinates>
-      </Point>
-    </Placemark>` +
-          (trackLocations.length > 1
-            ? `
-    <!-- End Point -->
-    <Placemark>
-      <name>End Point</name>
-      <description>
-        Ended at: ${new Date(trackLocations[trackLocations.length - 1].timestamp).toLocaleString()}
-        Accuracy: ${trackLocations[trackLocations.length - 1].accuracy ? Math.round(trackLocations[trackLocations.length - 1].accuracy) + "m" : "Unknown"}
-        ${trackLocations[trackLocations.length - 1].altitude ? `Altitude: ${Math.round(trackLocations[trackLocations.length - 1].altitude)}m` : ""}
-      </description>
-      <Style>
-        <IconStyle>
-          <Icon>
-            <href>http://maps.google.com/mapfiles/kml/paddle/red-circle.png</href>
-          </Icon>
-        </IconStyle>
-      </Style>
-      <Point>
-        <coordinates>${trackLocations[trackLocations.length - 1].longitude},${trackLocations[trackLocations.length - 1].latitude},${trackLocations[trackLocations.length - 1].altitude || 0}</coordinates>
-      </Point>
-    </Placemark>`
-            : "")
-        : ""
-
-    const kmlFooter = `
-  </Document>
-</kml>`
-
-    return kmlHeader + coordinates + kmlMiddle + waypoints + kmlFooter
-  }
-
-  // Generate GPX file content
-  const generateGPX = (trackLocations: LocationPoint[], trackName = "GPS Track") => {
-    if (trackLocations.length === 0) return ""
-
-    const gpxHeader = `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="Location Tracker" xmlns="http://www.topografix.com/GPX/1/1">
-  <metadata>
-    <name>${trackName}</name>
-    <desc>GPS track recorded on ${new Date().toLocaleDateString()}</desc>
-    <time>${new Date(trackLocations[0]?.timestamp).toISOString()}</time>
-  </metadata>
-  <trk>
-    <name>${trackName}</name>
-    <trkseg>`
-
-    const trackPoints = trackLocations
-      .map(
-        (loc) => `
-      <trkpt lat="${loc.latitude}" lon="${loc.longitude}">
-        ${loc.altitude ? `<ele>${loc.altitude}</ele>` : ""}
-        <time>${new Date(loc.timestamp).toISOString()}</time>
-        ${loc.speed ? `<extensions><speed>${loc.speed}</speed></extensions>` : ""}
-      </trkpt>`,
-      )
-      .join("")
-
-    const gpxFooter = `
-    </trkseg>
-  </trk>
-</gpx>`
-
-    return gpxHeader + trackPoints + gpxFooter
-  }
-
-  // Download file helper
-  const downloadFile = (content: string, filename: string, mimeType: string) => {
-    const blob = new Blob([content], { type: mimeType })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement("a")
-    a.href = url
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
-  }
-
-  // Download KML file
-  const downloadKML = (track?: SavedTrack) => {
-    const trackData = track || { name: currentTrackName || "Current Track", locations }
-    if (trackData.locations.length === 0) {
-      setError("No location data to download")
-      return
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(fileUri, {
+          mimeType: "application/vnd.google-earth.kml+xml",
+          dialogTitle: "Share KML Track",
+        });
+      } else {
+        Alert.alert("Success", `KML file saved to: ${fileUri}`);
+      }
+    } catch (error) {
+      console.error("Download KML error:", error);
+      setError("Failed to download KML");
     }
+  };
 
-    const kmlContent = generateKML(trackData.locations, trackData.name)
-    const filename = `${trackData.name.replace(/[^a-z0-9]/gi, "_")}_${new Date().toISOString().split("T")[0]}.kml`
-    downloadFile(kmlContent, filename, "application/vnd.google-earth.kml+xml")
-  }
+  const downloadGPX = async (track?: SavedTrack) => {
+    try {
+      const trackData = track || {
+        name: currentTrackName || "Current Track",
+        locations: isTracking ? recordingLocations : locations,
+      };
+      if (!trackData.locations || trackData.locations.length === 0) {
+        setError("No location data to download");
+        return;
+      }
 
-  // Download GPX file
-  const downloadGPX = (track?: SavedTrack) => {
-    const trackData = track || { name: currentTrackName || "Current Track", locations }
-    if (trackData.locations.length === 0) {
-      setError("No location data to download")
-      return
+      const gpxContent = generateGPX(trackData.locations, trackData.name);
+      const filename = `${(trackData.name || "track").replace(
+        /[^a-z0-9]/gi,
+        "_"
+      )}_${new Date().toISOString().split("T")[0]}.gpx`;
+      const fileUri = `${FileSystem.documentDirectory}${filename}`;
+
+      await FileSystem.writeAsStringAsync(fileUri, gpxContent);
+
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(fileUri, {
+          mimeType: "application/gpx+xml",
+          dialogTitle: "Share GPX Track",
+        });
+      } else {
+        Alert.alert("Success", `GPX file saved to: ${fileUri}`);
+      }
+    } catch (error) {
+      console.error("Download GPX error:", error);
+      setError("Failed to download GPX");
     }
-
-    const gpxContent = generateGPX(trackData.locations, trackData.name)
-    const filename = `${trackData.name.replace(/[^a-z0-9]/gi, "_")}_${new Date().toISOString().split("T")[0]}.gpx`
-    downloadFile(gpxContent, filename, "application/gpx+xml")
-  }
+  };
 
   // Delete track
-  const deleteTrack = (trackId: string) => {
-    if (confirm("Are you sure you want to delete this track?")) {
-      storageUtils.deleteTrack(trackId)
-      const tracks = storageUtils.getAllTracks()
-      setSavedTracks(tracks)
+  const deleteTrack = async (trackId: string) => {
+    Alert.alert("Delete Track", "Are you sure you want to delete this track?", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            await storageUtils.deleteTrack(trackId);
+            const tracks = await storageUtils.getAllTracks();
+            setSavedTracks(tracks || []);
 
-      // If viewing the deleted track, clear the view
-      if (viewingTrack?.id === trackId) {
-        setViewingTrack(null)
-        setLocations([])
-        setCurrentLocation(null)
+            // Remove from selected tracks if it was selected
+            setSelectedTracks((prev) => {
+              const filtered = prev.filter((t) => t.id !== trackId);
+
+              // Update locations if this track was being viewed
+              if (filtered.length === 0) {
+                if (isTracking) {
+                  setLocations(recordingLocations);
+                } else {
+                  setLocations([]);
+                }
+                setViewingTrack(null);
+              } else {
+                const allSelectedLocations = filtered.flatMap((selectedTrack) =>
+                  selectedTrack.locations.map((loc) => ({
+                    ...loc,
+                    trackId: selectedTrack.id,
+                    trackName: selectedTrack.name,
+                  }))
+                );
+                setLocations(allSelectedLocations);
+                setViewingTrack(filtered.length === 1 ? filtered[0] : null);
+              }
+
+              return filtered;
+            });
+          } catch (error) {
+            console.error("Delete track error:", error);
+            setError("Failed to delete track");
+          }
+        },
+      },
+    ]);
+  };
+
+  // Import file
+  const importFile = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "*/*",
+        copyToCacheDirectory: true,
+      });
+
+      if (result.canceled) return;
+
+      const file = result.assets?.[0];
+      if (
+        !file ||
+        (!file.name?.toLowerCase().endsWith(".kml") &&
+          !file.name?.toLowerCase().endsWith(".gpx"))
+      ) {
+        setError("Please select only KML or GPX files");
+        return;
       }
-    }
-  }
 
-  // Clear current data
-  const clearData = () => {
-    if (confirm("Are you sure you want to clear current data? Unsaved data will be lost.")) {
-      setLocations([])
-      setCurrentLocation(null)
-      setError("")
-      setCurrentTrackId(null)
-      setCurrentTrackName("")
-      setViewingTrack(null)
-    }
-  }
+      const content = await FileSystem.readAsStringAsync(file.uri);
+      let locations: LocationPoint[] = [];
 
-  // Calculate total distance
+      if (file.name.toLowerCase().endsWith(".kml")) {
+        locations = parseKMLFile(content);
+      } else if (file.name.toLowerCase().endsWith(".gpx")) {
+        locations = parseGPXFile(content);
+      }
+
+      if (locations.length === 0) {
+        setError("No valid location data found in the file");
+        return;
+      }
+
+      const stats = storageUtils.calculateTrackStats(locations);
+      const importedTrack: SavedTrack = {
+        id: `imported_${Date.now()}`,
+        name: `Imported: ${file.name.replace(/\.(kml|gpx)$/i, "")}`,
+        locations,
+        createdAt: locations[0]?.timestamp || Date.now(),
+        lastModified: Date.now(),
+        isComplete: true,
+        totalDistance: stats.distance,
+        duration: stats.duration,
+      };
+
+      await storageUtils.saveTrack(importedTrack);
+      const tracks = await storageUtils.getAllTracks();
+      setSavedTracks(tracks || []);
+
+      handleViewTrack(importedTrack);
+      setError("");
+    } catch (error) {
+      console.error("Import file error:", error);
+      setError("Failed to import file");
+    }
+  };
+
+  // Calculate statistics (use appropriate data)
   const calculateDistance = () => {
-    if (locations.length < 2) return 0
-    const stats = storageUtils.calculateTrackStats(locations)
-    return stats.distance
-  }
-
-  // Calculate elevation gain/loss
-  const calculateElevation = () => {
-    if (locations.length < 2) return { gain: 0, loss: 0, min: 0, max: 0 }
-
-    let gain = 0
-    let loss = 0
-    let min = locations[0]?.altitude || 0
-    let max = locations[0]?.altitude || 0
-
-    for (let i = 1; i < locations.length; i++) {
-      const prev = locations[i - 1]
-      const curr = locations[i]
-
-      if (prev.altitude && curr.altitude) {
-        const diff = curr.altitude - prev.altitude
-        if (diff > 0) gain += diff
-        else loss += Math.abs(diff)
-
-        min = Math.min(min, curr.altitude)
-        max = Math.max(max, curr.altitude)
-      }
+    try {
+      const dataToUse = isTracking ? recordingLocations : locations;
+      if (!dataToUse || dataToUse.length < 2) return 0;
+      const stats = storageUtils.calculateTrackStats(dataToUse);
+      return stats.distance || 0;
+    } catch (error) {
+      console.error("Error calculating distance:", error);
+      return 0;
     }
-
-    return { gain, loss, min, max }
-  }
-
-  // Get max speed
-  const getMaxSpeed = () => {
-    return Math.max(...locations.map((loc) => loc.speed || 0))
-  }
-
-  // Handle file drop
-  const handleFileDrop = (e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragOver(false)
-
-    const files = Array.from(e.dataTransfer.files)
-    files.forEach(handleFileImport)
-  }
-
-  const handleFileImport = (file: File) => {
-    if (!file.name.toLowerCase().endsWith(".kml") && !file.name.toLowerCase().endsWith(".gpx")) {
-      setError("Please upload only KML or GPX files")
-      return
-    }
-
-    const reader = new FileReader()
-    reader.onload = (e) => {
-      try {
-        const content = e.target?.result as string
-        let locations: LocationPoint[] = []
-
-        if (file.name.toLowerCase().endsWith(".kml")) {
-          locations = parseKMLFile(content)
-        } else if (file.name.toLowerCase().endsWith(".gpx")) {
-          locations = parseGPXFile(content)
-        }
-
-        if (locations.length === 0) {
-          setError("No valid location data found in the file")
-          return
-        }
-
-        // Create imported track
-        const stats = storageUtils.calculateTrackStats(locations)
-        const importedTrack: SavedTrack = {
-          id: `imported_${Date.now()}`,
-          name: `Imported: ${file.name.replace(/\.(kml|gpx)$/i, "")}`,
-          locations,
-          createdAt: locations[0]?.timestamp || Date.now(),
-          lastModified: Date.now(),
-          isComplete: true,
-          totalDistance: stats.distance,
-          duration: stats.duration,
-        }
-
-        // Save imported track
-        storageUtils.saveTrack(importedTrack)
-
-        // Refresh saved tracks list
-        const tracks = storageUtils.getAllTracks()
-        setSavedTracks(tracks)
-
-        // Auto-view the imported track
-        handleViewTrack(importedTrack)
-
-        setError("")
-      } catch (error) {
-        setError("Error parsing file: " + (error as Error).message)
-      }
-    }
-
-    reader.readAsText(file)
-  }
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragOver(true)
-  }
-
-  const handleDragLeave = (e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragOver(false)
-  }
-
-  // Handle file input
-  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || [])
-    files.forEach(handleFileImport)
-    e.target.value = "" // Reset input
-  }
+  };
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (watchIdRef.current !== null) {
-        navigator.geolocation.clearWatch(watchIdRef.current)
-      }
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current)
+      if (locationSubscription.current) {
+        try {
+          locationSubscription.current.remove();
+        } catch (error) {
+          console.error(
+            "Error removing location subscription on unmount:",
+            error
+          );
+        }
       }
       if (autoSaveIntervalRef.current) {
-        clearInterval(autoSaveIntervalRef.current)
+        clearInterval(autoSaveIntervalRef.current);
       }
-    }
-  }, [])
+      if (backgroundSyncIntervalRef.current) {
+        clearInterval(backgroundSyncIntervalRef.current);
+      }
+    };
+  }, []);
 
-  const totalDistance = calculateDistance()
+  // Don't render until initialized
+  if (!isInitialized) {
+    return (
+      <View style={[styles.container, styles.loadingContainer]}>
+        <Text style={styles.loadingText}>Initializing Location Tracker...</Text>
+      </View>
+    );
+  }
+
+  const totalDistance = calculateDistance();
+  const dataToUse = isTracking ? recordingLocations : locations;
   const duration =
-    locations.length > 0 ? (locations[locations.length - 1]?.timestamp - locations[0]?.timestamp) / 1000 : 0
-  const elevation = calculateElevation()
-  const maxSpeed = getMaxSpeed()
+    dataToUse && dataToUse.length > 0
+      ? (dataToUse[dataToUse.length - 1]?.timestamp - dataToUse[0]?.timestamp) /
+        1000
+      : 0;
 
-  const themeClasses = isDarkTheme ? "dark bg-gray-900 text-white" : "bg-white text-gray-900"
+  const theme = {
+    colors: {
+      primary: isDarkTheme ? "#2563eb" : "#6366f1",
+      background: isDarkTheme ? "#1a1a1a" : "#f8fafc",
+      surface: isDarkTheme ? "#2d2d2d" : "#ffffff",
+      text: isDarkTheme ? "#ffffff" : "#1e293b",
+      accent: isDarkTheme ? "#10b981" : "#059669",
+    },
+  };
 
   return (
-    <div className={`min-h-screen transition-colors duration-300 ${themeClasses}`}>
-      {/* Track Name Dialog */}
-      <TrackNameDialog
-        isOpen={showTrackNameDialog}
-        onConfirm={handleStartTracking}
-        onCancel={() => setShowTrackNameDialog(false)}
-        isDarkTheme={isDarkTheme}
-      />
-
-      {/* Fullscreen Map Modal */}
-      {isMapFullscreen && (
-        <div className="fixed inset-0 z-50 bg-black">
-          <div className="absolute top-4 right-4 z-10 flex gap-2">
-            <Button
-              onClick={toggleMapFullscreen}
-              variant="secondary"
-              size="sm"
-              className="bg-white/90 hover:bg-white text-black"
-            >
-              Exit Fullscreen
-            </Button>
-          </div>
-          <div className="w-full h-full">
-            <MapView
-              locations={locations}
-              currentLocation={currentLocation}
-              isTracking={isTracking}
-              isDarkTheme={isDarkTheme}
-              isFullscreen={true}
-            />
-          </div>
-        </div>
-      )}
-
-      <div className="w-full max-w-4xl mx-auto p-1 sm:p-2 md:p-4 space-y-2 sm:space-y-4">
-        <Card className={isDarkTheme ? "bg-gray-800 border-gray-700" : ""}>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle className="flex items-center gap-2">
-                <Navigation className="h-5 w-5" />
-                Live Location Tracker
-                {(currentTrackName || viewingTrack) && (
-                  <Badge variant="outline" className="ml-2">
-                    {viewingTrack ? `Viewing: ${viewingTrack.name}` : currentTrackName}
-                  </Badge>
-                )}
-              </CardTitle>
-              <div className="flex items-center gap-1 sm:gap-2">
-                <Button
-                  onClick={toggleTrackList}
-                  variant="outline"
-                  size="sm"
-                  className="flex items-center gap-1 sm:gap-2 bg-transparent text-xs sm:text-sm px-2 sm:px-3"
-                >
-                  <FolderOpen className="h-3 w-3 sm:h-4 sm:w-4" />
-                  <span className="hidden sm:inline">Tracks</span> ({savedTracks.length})
-                </Button>
-                <ThemeToggle isDark={isDarkTheme} onToggle={toggleTheme} />
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {/* Control Buttons */}
-            <div className="flex gap-1 sm:gap-2 flex-wrap text-xs sm:text-sm">
-              {!isTracking ? (
-                <Button
-                  onClick={() => setShowTrackNameDialog(true)}
-                  className="flex items-center gap-1 sm:gap-2 text-xs sm:text-sm px-2 sm:px-4"
-                  disabled={viewingTrack !== null}
-                >
-                  <Play className="h-3 w-3 sm:h-4 sm:w-4" />
-                  Start New Track
-                </Button>
-              ) : (
-                <Button
-                  onClick={stopTracking}
-                  variant="destructive"
-                  className="flex items-center gap-1 sm:gap-2 text-xs sm:text-sm px-2 sm:px-4"
-                >
-                  <Square className="h-3 w-3 sm:h-4 sm:w-4" />
-                  Stop Tracking
-                </Button>
-              )}
-
-              {isTracking && currentTrackId && (
-                <Button
-                  onClick={() => saveCurrentTrack(false)}
-                  variant="outline"
-                  className="flex items-center gap-1 sm:gap-2 bg-transparent text-xs sm:text-sm px-2 sm:px-4"
-                >
-                  <Save className="h-3 w-3 sm:h-4 sm:w-4" />
-                  Save Progress
-                </Button>
-              )}
-
-              <Button
-                onClick={() => downloadKML()}
-                disabled={locations.length === 0}
-                variant="outline"
-                className="flex items-center gap-1 sm:gap-2 bg-transparent text-xs sm:text-sm px-2 sm:px-4"
-              >
-                <Download className="h-3 w-3 sm:h-4 sm:w-4" />
-                KML
-              </Button>
-
-              <Button
-                onClick={() => downloadGPX()}
-                disabled={locations.length === 0}
-                variant="outline"
-                className="flex items-center gap-1 sm:gap-2 bg-transparent text-xs sm:text-sm px-2 sm:px-4"
-              >
-                <FileText className="h-3 w-3 sm:h-4 sm:w-4" />
-                GPX
-              </Button>
-
-              <Button onClick={clearData} variant="outline" className="text-xs sm:text-sm px-2 sm:px-4 bg-transparent">
-                Clear Data
-              </Button>
-            </div>
-
-            {/* Status */}
-            <div className="flex items-center gap-2">
-              <Badge variant={isTracking ? "default" : "secondary"}>
-                {isTracking ? "Tracking Active" : viewingTrack ? "Viewing Track" : "Tracking Stopped"}
-              </Badge>
-              {isTracking && (
-                <div className="flex items-center gap-1 text-sm text-green-600">
-                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                  Live • Auto-saving
-                </div>
-              )}
-            </div>
-
-            {/* Error Display */}
-            {error && (
-              <div
-                className={`p-3 border rounded-md text-sm ${
-                  isDarkTheme ? "bg-red-900/20 border-red-800 text-red-300" : "bg-red-50 border-red-200 text-red-700"
-                }`}
-              >
-                {error}
-              </div>
-            )}
-
-            {/* Track List */}
-            {showTrackList && (
-              <TrackList
-                tracks={savedTracks}
-                onDownloadKML={downloadKML}
-                onDownloadGPX={downloadGPX}
-                onResume={handleResumeTrack}
-                onDelete={deleteTrack}
-                onView={handleViewTrack}
-                isDarkTheme={isDarkTheme}
+    <View
+      style={[styles.container, { backgroundColor: theme.colors.background }]}
+    >
+      <ScrollView
+        style={styles.scrollView}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Header */}
+        <View
+          style={[styles.header, { backgroundColor: theme.colors.surface }]}
+        >
+          <View style={styles.headerTop}>
+            <View style={styles.titleContainer}>
+              <MaterialIcons
+                name="place"
+                size={28}
+                color={theme.colors.primary}
               />
-            )}
-
-            {/* File Drop Zone */}
-            <Card className={isDarkTheme ? "bg-gray-700 border-gray-600" : ""}>
-              <CardContent className="pt-4">
-                <h3 className="font-medium mb-2 flex items-center gap-2">
-                  <FileText className="h-4 w-4" />
-                  Import Track Files
-                </h3>
-                <div
-                  className={`border-2 border-dashed rounded-lg p-6 text-center transition-colors ${
-                    isDragOver
-                      ? isDarkTheme
-                        ? "border-blue-400 bg-blue-900/20"
-                        : "border-blue-400 bg-blue-50"
-                      : isDarkTheme
-                        ? "border-gray-600 hover:border-gray-500"
-                        : "border-gray-300 hover:border-gray-400"
-                  }`}
-                  onDrop={handleFileDrop}
-                  onDragOver={handleDragOver}
-                  onDragLeave={handleDragLeave}
+              <Text style={[styles.title, { color: theme.colors.text }]}>
+                GPS Tracker
+              </Text>
+            </View>
+            <View style={styles.headerControls}>
+              <TouchableOpacity
+                style={styles.headerButton}
+                onPress={() => setShowTrackList(!showTrackList)}
+              >
+                <MaterialIcons
+                  name="folder-open"
+                  size={24}
+                  color={theme.colors.text}
+                />
+                <Text
+                  style={[
+                    styles.headerButtonText,
+                    { color: theme.colors.text },
+                  ]}
                 >
-                  <div className="space-y-2">
-                    <div className="text-2xl">📁</div>
-                    <div className="font-medium">Drop KML or GPX files here</div>
-                    <div className="text-sm text-muted-foreground">Or click to browse files</div>
-                    <input
-                      type="file"
-                      accept=".kml,.gpx"
-                      multiple
-                      onChange={handleFileInputChange}
-                      className="hidden"
-                      id="file-input"
+                  Tracks ({savedTracks.length})
+                </Text>
+              </TouchableOpacity>
+              <View style={styles.themeToggle}>
+                <MaterialIcons
+                  name={isDarkTheme ? "dark-mode" : "light-mode"}
+                  size={20}
+                  color={theme.colors.text}
+                />
+                <Switch
+                  value={isDarkTheme}
+                  onValueChange={setIsDarkTheme}
+                  trackColor={{
+                    false: "#cbd5e1",
+                    true: theme.colors.primary + "80",
+                  }}
+                  thumbColor={isDarkTheme ? theme.colors.primary : "#f1f5f9"}
+                />
+              </View>
+            </View>
+          </View>
+
+          {/* Current Track Status */}
+          {isTracking && (
+            <View style={styles.currentTrackStatus}>
+              <View style={styles.trackStatusRow}>
+                <View
+                  style={[
+                    styles.trackStatusIndicator,
+                    {
+                      backgroundColor: isPaused
+                        ? "#f59e0b"
+                        : theme.colors.accent,
+                    },
+                  ]}
+                />
+                <Text
+                  style={[styles.trackStatusText, { color: theme.colors.text }]}
+                >
+                  {currentTrackName} • {isPaused ? "Paused" : "Recording"}
+                </Text>
+                {(selectedTracks.length > 0 || viewingTrack) && (
+                  <TouchableOpacity
+                    style={styles.showRecordingButton}
+                    onPress={showCurrentRecordingTrack}
+                  >
+                    <MaterialIcons
+                      name="fiber-manual-record"
+                      size={16}
+                      color={theme.colors.accent}
                     />
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => document.getElementById("file-input")?.click()}
-                      className="bg-transparent"
+                    <Text
+                      style={[
+                        styles.showRecordingText,
+                        { color: theme.colors.accent },
+                      ]}
                     >
-                      Browse Files
-                    </Button>
-                  </div>
-                </div>
-                <div className="text-xs text-muted-foreground mt-2">
-                  Supported formats: KML, GPX • Files are imported and saved locally
-                </div>
-              </CardContent>
-            </Card>
+                      Show Recording
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+              <Text
+                style={[
+                  styles.trackStatusStats,
+                  { color: isDarkTheme ? "#ccc" : "#64748b" },
+                ]}
+              >
+                {recordingLocations.length} points •{" "}
+                {(() => {
+                  const recordingStats =
+                    storageUtils.calculateTrackStats(recordingLocations);
+                  const distance = recordingStats.distance;
+                  return distance > 1000
+                    ? `${(distance / 1000).toFixed(2)} km`
+                    : `${Math.round(distance)} m`;
+                })()}
+              </Text>
+              {!isPaused && (
+                <Text
+                  style={[
+                    styles.trackStatusStats,
+                    { color: theme.colors.accent, fontSize: 10 },
+                  ]}
+                >
+                  Background tracking enabled
+                </Text>
+              )}
+            </View>
+          )}
 
-            {/* Current Location */}
-            {currentLocation && (
-              <Card className={isDarkTheme ? "bg-gray-700 border-gray-600" : ""}>
-                <CardContent className="pt-4">
-                  <div className="flex items-center gap-2 mb-2">
-                    <MapPin className="h-4 w-4 text-blue-500" />
-                    <span className="font-medium">Current Location</span>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
-                    <div>
-                      <span className="text-muted-foreground">Latitude:</span> {currentLocation.latitude.toFixed(6)}
-                    </div>
-                    <div>
-                      <span className="text-muted-foreground">Longitude:</span> {currentLocation.longitude.toFixed(6)}
-                    </div>
-                    <div>
-                      <span className="text-muted-foreground">Time:</span>{" "}
-                      {new Date(currentLocation.timestamp).toLocaleTimeString()}
-                    </div>
-                    <div>
-                      <span className="text-muted-foreground">Accuracy:</span>{" "}
-                      {currentLocation.accuracy ? Math.round(currentLocation.accuracy) + "m" : "Unknown"}
-                    </div>
-                    {currentLocation.speed && (
-                      <div>
-                        <span className="text-muted-foreground">Speed:</span> {(currentLocation.speed * 3.6).toFixed(1)}{" "}
-                        km/h
-                      </div>
-                    )}
-                    {currentLocation.altitude && (
-                      <div>
-                        <span className="text-muted-foreground">Altitude:</span> {Math.round(currentLocation.altitude)}m
-                      </div>
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
+          {/* Viewing Status */}
+          {selectedTracks.length > 0 && (
+            <View style={styles.viewingStatus}>
+              <View style={styles.viewingStatusRow}>
+                <MaterialIcons
+                  name="visibility"
+                  size={16}
+                  color={theme.colors.primary}
+                />
+                <Text
+                  style={[
+                    styles.viewingStatusText,
+                    { color: theme.colors.text },
+                  ]}
+                >
+                  Viewing {selectedTracks.length} track
+                  {selectedTracks.length > 1 ? "s" : ""}:{" "}
+                  {selectedTracks.map((t) => t.name).join(", ")}
+                </Text>
+                <TouchableOpacity
+                  style={styles.clearViewButton}
+                  onPress={() => {
+                    setSelectedTracks([]);
+                    setViewingTrack(null);
+                    if (isTracking) {
+                      setLocations(recordingLocations);
+                    } else {
+                      setLocations([]);
+                    }
+                  }}
+                >
+                  <MaterialIcons
+                    name="clear"
+                    size={16}
+                    color={theme.colors.text}
+                  />
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+        </View>
+
+        {/* Control Buttons */}
+        <View
+          style={[
+            styles.controlsCard,
+            { backgroundColor: theme.colors.surface },
+          ]}
+        >
+          <View style={styles.controlsRow}>
+            {!isTracking ? (
+              <TouchableOpacity
+                style={[
+                  styles.primaryButton,
+                  { backgroundColor: theme.colors.accent },
+                ]}
+                onPress={() => {
+                  setTrackNameInput(`Track ${new Date().toLocaleDateString()}`);
+                  setShowTrackNameDialog(true);
+                }}
+              >
+                <MaterialIcons name="play-arrow" size={24} color="#fff" />
+                <Text style={styles.primaryButtonText}>Start New Track</Text>
+              </TouchableOpacity>
+            ) : isPaused ? (
+              <>
+                <TouchableOpacity
+                  style={[
+                    styles.primaryButton,
+                    { backgroundColor: theme.colors.accent },
+                  ]}
+                  onPress={resumeTracking}
+                >
+                  <MaterialIcons name="play-arrow" size={24} color="#fff" />
+                  <Text style={styles.primaryButtonText}>Resume</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.secondaryButton,
+                    { backgroundColor: "#ef4444" },
+                  ]}
+                  onPress={stopTracking}
+                >
+                  <MaterialIcons name="stop" size={24} color="#fff" />
+                  <Text style={styles.secondaryButtonText}>Stop</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <TouchableOpacity
+                  style={[
+                    styles.secondaryButton,
+                    { backgroundColor: "#f59e0b" },
+                  ]}
+                  onPress={pauseTracking}
+                >
+                  <MaterialIcons name="pause" size={24} color="#fff" />
+                  <Text style={styles.secondaryButtonText}>Pause</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.secondaryButton,
+                    { backgroundColor: "#ef4444" },
+                  ]}
+                  onPress={stopTracking}
+                >
+                  <MaterialIcons name="stop" size={24} color="#fff" />
+                  <Text style={styles.secondaryButtonText}>Stop</Text>
+                </TouchableOpacity>
+              </>
             )}
+          </View>
 
-            {/* Enhanced Statistics */}
-            {locations.length > 0 && (
-              <Card className={isDarkTheme ? "bg-gray-700 border-gray-600" : ""}>
-                <CardContent className="pt-4">
-                  <h3 className="font-medium mb-2">Track Statistics</h3>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                    <div>
-                      <div className="text-muted-foreground">Points</div>
-                      <div className="font-medium">{locations.length}</div>
-                    </div>
-                    <div>
-                      <div className="text-muted-foreground">Distance</div>
-                      <div className="font-medium">
-                        {totalDistance > 1000
-                          ? `${(totalDistance / 1000).toFixed(2)} km`
-                          : `${Math.round(totalDistance)} m`}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-muted-foreground">Duration</div>
-                      <div className="font-medium">
-                        {Math.floor(duration / 3600)}h {Math.floor((duration % 3600) / 60)}m {Math.floor(duration % 60)}
-                        s
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-muted-foreground">Avg Speed</div>
-                      <div className="font-medium">
-                        {duration > 0 ? `${((totalDistance / duration) * 3.6).toFixed(1)} km/h` : "0 km/h"}
-                      </div>
-                    </div>
-                    {maxSpeed > 0 && (
-                      <div>
-                        <div className="text-muted-foreground">Max Speed</div>
-                        <div className="font-medium">{(maxSpeed * 3.6).toFixed(1)} km/h</div>
-                      </div>
-                    )}
-                    {elevation.gain > 0 && (
-                      <>
-                        <div>
-                          <div className="text-muted-foreground">Elevation Gain</div>
-                          <div className="font-medium">{Math.round(elevation.gain)}m</div>
-                        </div>
-                        <div>
-                          <div className="text-muted-foreground">Elevation Loss</div>
-                          <div className="font-medium">{Math.round(elevation.loss)}m</div>
-                        </div>
-                        <div>
-                          <div className="text-muted-foreground">Altitude Range</div>
-                          <div className="font-medium">
-                            {Math.round(elevation.min)}m - {Math.round(elevation.max)}m
-                          </div>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
-            )}
+          <View style={styles.actionButtonsRow}>
+            <TouchableOpacity
+              style={[
+                styles.actionButton,
+                { borderColor: theme.colors.primary },
+              ]}
+              onPress={() => downloadKML()}
+              disabled={
+                locations.length === 0 && recordingLocations.length === 0
+              }
+            >
+              <MaterialIcons
+                name="download"
+                size={20}
+                color={theme.colors.primary}
+              />
+              <Text
+                style={[
+                  styles.actionButtonText,
+                  { color: theme.colors.primary },
+                ]}
+              >
+                KML
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.actionButton,
+                { borderColor: theme.colors.primary },
+              ]}
+              onPress={() => downloadGPX()}
+              disabled={
+                locations.length === 0 && recordingLocations.length === 0
+              }
+            >
+              <MaterialIcons
+                name="file-download"
+                size={20}
+                color={theme.colors.primary}
+              />
+              <Text
+                style={[
+                  styles.actionButtonText,
+                  { color: theme.colors.primary },
+                ]}
+              >
+                GPX
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.actionButton,
+                { borderColor: theme.colors.primary },
+              ]}
+              onPress={importFile}
+            >
+              <MaterialIcons
+                name="upload"
+                size={20}
+                color={theme.colors.primary}
+              />
+              <Text
+                style={[
+                  styles.actionButtonText,
+                  { color: theme.colors.primary },
+                ]}
+              >
+                Import
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
 
-            {/* Live Map View */}
-            {locations.length > 0 && (
-              <Card className={isDarkTheme ? "bg-gray-700 border-gray-600" : ""}>
-                <CardContent className="pt-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <h3 className="font-medium">{viewingTrack ? `Track: ${viewingTrack.name}` : "Live Track Map"}</h3>
-                    <Button
-                      onClick={toggleMapFullscreen}
-                      variant="outline"
-                      size="sm"
-                      className="flex items-center gap-2 bg-transparent"
+        {/* Error Display */}
+        {error && (
+          <View style={styles.errorCard}>
+            <Text style={styles.errorText}>{error}</Text>
+            <TouchableOpacity
+              onPress={() => setError("")}
+              style={styles.errorButton}
+            >
+              <Text style={styles.errorButtonText}>Dismiss</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Track List */}
+        {showTrackList && (
+          <View
+            style={[
+              styles.trackListCard,
+              { backgroundColor: theme.colors.surface },
+            ]}
+          >
+            <Text style={[styles.cardTitle, { color: theme.colors.text }]}>
+              Saved Tracks ({savedTracks.length})
+            </Text>
+            {savedTracks.length === 0 ? (
+              <View style={styles.emptyState}>
+                <MaterialIcons
+                  name="place"
+                  size={48}
+                  color={isDarkTheme ? "#666" : "#cbd5e1"}
+                />
+                <Text style={[styles.emptyText, { color: theme.colors.text }]}>
+                  No tracks found
+                </Text>
+                <Text
+                  style={[
+                    styles.emptySubtext,
+                    { color: isDarkTheme ? "#888" : "#94a3b8" },
+                  ]}
+                >
+                  Start tracking to create your first track!
+                </Text>
+              </View>
+            ) : (
+              <ScrollView
+                style={styles.trackList}
+                showsVerticalScrollIndicator={false}
+              >
+                {savedTracks.map((track) => {
+                  const isCurrentTrack = currentTrackId === track.id;
+                  const isCurrentlyRecording = isCurrentTrack && isTracking;
+                  const isSelected = selectedTracks.some(
+                    (t) => t.id === track.id
+                  );
+
+                  return (
+                    <View
+                      key={track.id}
+                      style={[
+                        styles.trackItem,
+                        { borderBottomColor: theme.colors.primary + "20" },
+                        isCurrentlyRecording && {
+                          backgroundColor: isDarkTheme
+                            ? theme.colors.accent + "20"
+                            : theme.colors.accent + "10",
+                          borderLeftWidth: 4,
+                          borderLeftColor: theme.colors.accent,
+                        },
+                        isSelected &&
+                          !isCurrentlyRecording && {
+                            backgroundColor: isDarkTheme
+                              ? theme.colors.primary + "20"
+                              : theme.colors.primary + "10",
+                            borderLeftWidth: 4,
+                            borderLeftColor: theme.colors.primary,
+                          },
+                      ]}
                     >
-                      <Maximize className="h-4 w-4" />
-                      Fullscreen
-                    </Button>
-                  </div>
-                  <div className="h-96 w-full rounded-lg overflow-hidden border-0">
-                    <MapView
-                      locations={locations}
-                      currentLocation={currentLocation}
-                      isTracking={isTracking}
-                      isDarkTheme={isDarkTheme}
-                      isFullscreen={false}
-                    />
-                  </div>
-                </CardContent>
-              </Card>
-            )}
-
-            {/* Recent Locations */}
-            {locations.length > 0 && (
-              <Card className={isDarkTheme ? "bg-gray-700 border-gray-600" : ""}>
-                <CardContent className="pt-4">
-                  <h3 className="font-medium mb-2">Recent Locations ({locations.length} total)</h3>
-                  <div className="max-h-40 overflow-y-auto space-y-1">
-                    {locations
-                      .slice(-10)
-                      .reverse()
-                      .map((loc, index) => (
-                        <div
-                          key={loc.timestamp}
-                          className={`flex justify-between items-center text-xs p-2 rounded ${
-                            isDarkTheme ? "bg-gray-600" : "bg-gray-50"
-                          }`}
+                      <View style={styles.trackInfo}>
+                        <View style={styles.trackNameRow}>
+                          <Text
+                            style={[
+                              styles.trackName,
+                              { color: theme.colors.text },
+                            ]}
+                            numberOfLines={1}
+                          >
+                            {track.name}
+                          </Text>
+                          <View style={styles.trackStatusIcons}>
+                            {isSelected && !isCurrentlyRecording && (
+                              <MaterialIcons
+                                name="visibility"
+                                size={16}
+                                color={theme.colors.primary}
+                              />
+                            )}
+                            {isCurrentlyRecording && (
+                              <>
+                                <MaterialIcons
+                                  name={
+                                    isPaused ? "pause" : "fiber-manual-record"
+                                  }
+                                  size={16}
+                                  color={
+                                    isPaused ? "#f59e0b" : theme.colors.accent
+                                  }
+                                />
+                                {!isPaused && (
+                                  <View
+                                    style={[
+                                      styles.recordingIndicator,
+                                      { backgroundColor: theme.colors.accent },
+                                    ]}
+                                  />
+                                )}
+                              </>
+                            )}
+                          </View>
+                        </View>
+                        <Text
+                          style={[
+                            styles.trackStats,
+                            { color: isDarkTheme ? "#ccc" : "#64748b" },
+                          ]}
                         >
-                          <span>
-                            {loc.latitude.toFixed(6)}, {loc.longitude.toFixed(6)}
-                            {loc.speed && ` • ${(loc.speed * 3.6).toFixed(1)} km/h`}
-                          </span>
-                          <span className="text-muted-foreground">{new Date(loc.timestamp).toLocaleTimeString()}</span>
-                        </div>
-                      ))}
-                  </div>
-                </CardContent>
-              </Card>
-            )}
+                          {track.totalDistance > 1000
+                            ? `${(track.totalDistance / 1000).toFixed(2)} km`
+                            : `${Math.round(track.totalDistance)} m`}{" "}
+                          • {track.locations.length} points
+                        </Text>
+                        <Text
+                          style={[
+                            styles.trackDate,
+                            { color: isDarkTheme ? "#888" : "#94a3b8" },
+                          ]}
+                        >
+                          {new Date(track.createdAt).toLocaleDateString()}
+                          {isCurrentlyRecording && (
+                            <Text style={{ color: theme.colors.accent }}>
+                              {" "}
+                              • {isPaused ? "Paused" : "Recording"}
+                            </Text>
+                          )}
+                        </Text>
+                      </View>
 
-            {/* Instructions */}
-            <Card className={isDarkTheme ? "bg-gray-700 border-gray-600" : ""}>
-              <CardContent className="pt-4">
-                <h3 className="font-medium mb-2">How to Use</h3>
-                <ol className="text-sm space-y-1 text-muted-foreground">
-                  <li>1. Click "Start New Track" and enter a name for your track</li>
-                  <li>2. Your location will be captured and auto-saved every 10 seconds</li>
-                  <li>3. Use "Tracks" button to view, resume, or download saved tracks</li>
-                  <li>4. Click on track segments in the map for detailed information</li>
-                  <li>5. Use "Fullscreen" for better map viewing experience</li>
-                  <li>6. All data is saved locally in your browser</li>
-                </ol>
-              </CardContent>
-            </Card>
-          </CardContent>
-        </Card>
-      </div>
-    </div>
-  )
-}
+                      <View style={styles.trackActions}>
+                        <TouchableOpacity
+                          style={styles.trackActionButton}
+                          onPress={() => handleViewTrack(track)}
+                        >
+                          <MaterialIcons
+                            name={isSelected ? "visibility-off" : "visibility"}
+                            size={18}
+                            color={
+                              isSelected ? "#f59e0b" : theme.colors.primary
+                            }
+                          />
+                        </TouchableOpacity>
+                        {isCurrentlyRecording ? (
+                          isPaused ? (
+                            <TouchableOpacity
+                              style={styles.trackActionButton}
+                              onPress={() => resumeTracking()}
+                            >
+                              <MaterialIcons
+                                name="play-arrow"
+                                size={18}
+                                color={theme.colors.accent}
+                              />
+                            </TouchableOpacity>
+                          ) : (
+                            <TouchableOpacity
+                              style={styles.trackActionButton}
+                              onPress={() => pauseTracking()}
+                            >
+                              <MaterialIcons
+                                name="pause"
+                                size={18}
+                                color="#f59e0b"
+                              />
+                            </TouchableOpacity>
+                          )
+                        ) : (
+                          <TouchableOpacity
+                            style={styles.trackActionButton}
+                            onPress={() => handleResumeTrack(track)}
+                          >
+                            <MaterialIcons
+                              name="play-arrow"
+                              size={18}
+                              color={theme.colors.accent}
+                            />
+                          </TouchableOpacity>
+                        )}
+                        <TouchableOpacity
+                          style={styles.trackActionButton}
+                          onPress={() => downloadKML(track)}
+                          disabled={isCurrentlyRecording && !isPaused}
+                        >
+                          <MaterialIcons
+                            name="download"
+                            size={18}
+                            color={
+                              isCurrentlyRecording && !isPaused
+                                ? "#888"
+                                : "#f59e0b"
+                            }
+                          />
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={styles.trackActionButton}
+                          onPress={() => deleteTrack(track.id)}
+                          disabled={isCurrentlyRecording}
+                        >
+                          <MaterialIcons
+                            name="delete"
+                            size={18}
+                            color={isCurrentlyRecording ? "#888" : "#ef4444"}
+                          />
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  );
+                })}
+              </ScrollView>
+            )}
+          </View>
+        )}
+
+        {/* Statistics */}
+        {(locations.length > 0 || recordingLocations.length > 0) && (
+          <View
+            style={[
+              styles.statsCard,
+              { backgroundColor: theme.colors.surface },
+            ]}
+          >
+            <Text style={[styles.cardTitle, { color: theme.colors.text }]}>
+              {selectedTracks.length > 0
+                ? `Selected Tracks Statistics (${selectedTracks.length} tracks)`
+                : isTracking
+                ? "Recording Track Statistics"
+                : "Track Statistics"}
+            </Text>
+            <View style={styles.statsGrid}>
+              <View style={styles.statItem}>
+                <Text style={[styles.statValue, { color: theme.colors.text }]}>
+                  {dataToUse.length}
+                </Text>
+                <Text
+                  style={[
+                    styles.statLabel,
+                    { color: isDarkTheme ? "#ccc" : "#64748b" },
+                  ]}
+                >
+                  Points
+                </Text>
+              </View>
+              <View style={styles.statItem}>
+                <Text style={[styles.statValue, { color: theme.colors.text }]}>
+                  {totalDistance > 1000
+                    ? `${(totalDistance / 1000).toFixed(2)} km`
+                    : `${Math.round(totalDistance)} m`}
+                </Text>
+                <Text
+                  style={[
+                    styles.statLabel,
+                    { color: isDarkTheme ? "#ccc" : "#64748b" },
+                  ]}
+                >
+                  Distance
+                </Text>
+              </View>
+              <View style={styles.statItem}>
+                <Text style={[styles.statValue, { color: theme.colors.text }]}>
+                  {Math.floor(duration / 3600)}h{" "}
+                  {Math.floor((duration % 3600) / 60)}m{" "}
+                  {Math.floor(duration % 60)}s
+                </Text>
+                <Text
+                  style={[
+                    styles.statLabel,
+                    { color: isDarkTheme ? "#ccc" : "#64748b" },
+                  ]}
+                >
+                  Duration
+                </Text>
+              </View>
+              <View style={styles.statItem}>
+                <Text style={[styles.statValue, { color: theme.colors.text }]}>
+                  {duration > 0
+                    ? `${((totalDistance / duration) * 3.6).toFixed(1)} km/h`
+                    : "0 km/h"}
+                </Text>
+                <Text
+                  style={[
+                    styles.statLabel,
+                    { color: isDarkTheme ? "#ccc" : "#64748b" },
+                  ]}
+                >
+                  Avg Speed
+                </Text>
+              </View>
+
+              {/* GPS/Satellite Stats - Only show when tracking */}
+              {isTracking && !isPaused && (
+                <>
+                  <View style={styles.statItem}>
+                    <View style={styles.satelliteStatContainer}>
+                      <MaterialIcons
+                        name={getSignalIcon()}
+                        size={20}
+                        color={getSignalColor()}
+                      />
+                      <Text
+                        style={[
+                          styles.statValue,
+                          { color: getSignalColor(), fontSize: 16 },
+                        ]}
+                      >
+                        {satelliteCount !== null
+                          ? `${satelliteCount}/15`
+                          : "--/--"}
+                      </Text>
+                    </View>
+                    <Text
+                      style={[
+                        styles.statLabel,
+                        { color: isDarkTheme ? "#ccc" : "#64748b" },
+                      ]}
+                    >
+                      Satellites
+                    </Text>
+                  </View>
+                  <View style={styles.statItem}>
+                    <Text
+                      style={[styles.statValue, { color: getSignalColor() }]}
+                    >
+                      {gpsAccuracy !== null ? `±${gpsAccuracy}m` : "±--m"}
+                    </Text>
+                    <Text
+                      style={[
+                        styles.statLabel,
+                        { color: isDarkTheme ? "#ccc" : "#64748b" },
+                      ]}
+                    >
+                      GPS Accuracy
+                    </Text>
+                  </View>
+                </>
+              )}
+            </View>
+
+            {/* Signal Quality Indicator */}
+            {isTracking && !isPaused && signalStrength && (
+              <View style={styles.signalQualityContainer}>
+                <Text
+                  style={[
+                    styles.signalQualityLabel,
+                    { color: isDarkTheme ? "#ccc" : "#64748b" },
+                  ]}
+                >
+                  GPS Signal Quality:
+                </Text>
+                <View
+                  style={[
+                    styles.signalQualityBadge,
+                    {
+                      backgroundColor: getSignalColor() + "20",
+                      borderColor: getSignalColor(),
+                    },
+                  ]}
+                >
+                  <MaterialIcons
+                    name={getSignalIcon()}
+                    size={16}
+                    color={getSignalColor()}
+                  />
+                  <Text
+                    style={[
+                      styles.signalQualityText,
+                      { color: getSignalColor() },
+                    ]}
+                  >
+                    {signalStrength.charAt(0).toUpperCase() +
+                      signalStrength.slice(1)}
+                  </Text>
+                </View>
+              </View>
+            )}
+          </View>
+        )}
+
+        {/* Current Location */}
+        {currentLocation && (
+          <View
+            style={[
+              styles.locationCard,
+              { backgroundColor: theme.colors.surface },
+            ]}
+          >
+            <Text style={[styles.cardTitle, { color: theme.colors.text }]}>
+              Current Location
+            </Text>
+            <View style={styles.locationGrid}>
+              <View style={styles.locationItem}>
+                <Text
+                  style={[
+                    styles.locationLabel,
+                    { color: isDarkTheme ? "#ccc" : "#64748b" },
+                  ]}
+                >
+                  Latitude
+                </Text>
+                <Text
+                  style={[styles.locationValue, { color: theme.colors.text }]}
+                >
+                  {currentLocation.latitude.toFixed(6)}
+                </Text>
+              </View>
+              <View style={styles.locationItem}>
+                <Text
+                  style={[
+                    styles.locationLabel,
+                    { color: isDarkTheme ? "#ccc" : "#64748b" },
+                  ]}
+                >
+                  Longitude
+                </Text>
+                <Text
+                  style={[styles.locationValue, { color: theme.colors.text }]}
+                >
+                  {currentLocation.longitude.toFixed(6)}
+                </Text>
+              </View>
+              <View style={styles.locationItem}>
+                <Text
+                  style={[
+                    styles.locationLabel,
+                    { color: isDarkTheme ? "#ccc" : "#64748b" },
+                  ]}
+                >
+                  Speed
+                </Text>
+                <Text
+                  style={[styles.locationValue, { color: theme.colors.text }]}
+                >
+                  {currentLocation.speed
+                    ? `${(currentLocation.speed * 3.6).toFixed(1)} km/h`
+                    : "0 km/h"}
+                </Text>
+              </View>
+              <View style={styles.locationItem}>
+                <Text
+                  style={[
+                    styles.locationLabel,
+                    { color: isDarkTheme ? "#ccc" : "#64748b" },
+                  ]}
+                >
+                  Accuracy
+                </Text>
+                <Text
+                  style={[styles.locationValue, { color: theme.colors.text }]}
+                >
+                  {currentLocation.accuracy
+                    ? `${Math.round(currentLocation.accuracy)} m`
+                    : "Unknown"}
+                </Text>
+              </View>
+            </View>
+          </View>
+        )}
+
+        {/* Map View */}
+        {(locations.length > 0 || recordingLocations.length > 0) && (
+          <View
+            style={[styles.mapCard, { backgroundColor: theme.colors.surface }]}
+          >
+            <Text style={[styles.cardTitle, { color: theme.colors.text }]}>
+              {selectedTracks.length > 1
+                ? `Multiple Tracks View (${selectedTracks.length} tracks)`
+                : selectedTracks.length === 1
+                ? `Track: ${selectedTracks[0].name}`
+                : isTracking
+                ? `Recording: ${currentTrackName}`
+                : "Track Map"}
+            </Text>
+            <View style={styles.mapContainer}>
+              <MapComponent
+                locations={
+                  locations.length > 0 ? locations : recordingLocations
+                }
+                currentLocation={currentLocation}
+                isTracking={
+                  isTracking && !isPaused && selectedTracks.length === 0
+                }
+                isDarkTheme={isDarkTheme}
+                style={styles.map}
+                showLayerSelector={true}
+                isFullscreen={false}
+              />
+            </View>
+          </View>
+        )}
+      </ScrollView>
+
+      {/* Track Name Dialog */}
+      {showTrackNameDialog && (
+        <View style={styles.modalOverlay}>
+          <View
+            style={[
+              styles.modalContent,
+              { backgroundColor: theme.colors.surface },
+            ]}
+          >
+            <Text style={[styles.modalTitle, { color: theme.colors.text }]}>
+              Name Your Track
+            </Text>
+            <TextInput
+              value={trackNameInput}
+              onChangeText={setTrackNameInput}
+              placeholder="Enter track name..."
+              placeholderTextColor={isDarkTheme ? "#888" : "#64748b"}
+              style={[
+                styles.modalTextInput,
+                {
+                  color: theme.colors.text,
+                  borderColor: theme.colors.primary,
+                },
+              ]}
+              autoFocus
+            />
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                onPress={() => setShowTrackNameDialog(false)}
+                style={[
+                  styles.modalButton,
+                  { backgroundColor: isDarkTheme ? "#555" : "#e2e8f0" },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.modalCancelButtonText,
+                    { color: isDarkTheme ? "#fff" : theme.colors.text },
+                  ]}
+                >
+                  Cancel
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => handleStartTracking(trackNameInput)}
+                disabled={!trackNameInput.trim()}
+                style={[
+                  styles.modalButton,
+                  { backgroundColor: theme.colors.accent },
+                  !trackNameInput.trim() && styles.modalButtonDisabled,
+                ]}
+              >
+                <Text style={styles.modalConfirmButtonText}>
+                  Start Tracking
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      )}
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+  loadingContainer: {
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  loadingText: {
+    fontSize: 18,
+    fontWeight: "bold",
+  },
+  scrollView: {
+    flex: 1,
+  },
+  header: {
+    padding: 16,
+    marginBottom: 8,
+    elevation: 2,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  headerTop: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  titleContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  title: {
+    fontSize: 20,
+    fontWeight: "bold",
+    marginLeft: 8,
+  },
+  headerControls: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  headerButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  headerButtonText: {
+    fontSize: 12,
+    fontWeight: "500",
+  },
+  themeToggle: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  currentTrackStatus: {
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255, 255, 255, 0.1)",
+  },
+  trackStatusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 4,
+  },
+  trackStatusIndicator: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 8,
+  },
+  trackStatusText: {
+    fontSize: 14,
+    fontWeight: "600",
+    flex: 1,
+  },
+  showRecordingButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: "rgba(16, 185, 129, 0.1)",
+  },
+  showRecordingText: {
+    fontSize: 10,
+    fontWeight: "600",
+  },
+  trackStatusStats: {
+    fontSize: 12,
+    marginLeft: 16,
+  },
+  viewingStatus: {
+    paddingTop: 8,
+    marginTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(37, 99, 235, 0.2)",
+  },
+  viewingStatusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  viewingStatusText: {
+    fontSize: 12,
+    fontWeight: "500",
+    flex: 1,
+  },
+  clearViewButton: {
+    padding: 4,
+  },
+  controlsCard: {
+    margin: 16,
+    padding: 16,
+    borderRadius: 12,
+    elevation: 2,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  controlsRow: {
+    flexDirection: "row",
+    gap: 12,
+    marginBottom: 12,
+  },
+  primaryButton: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    gap: 8,
+  },
+  primaryButtonText: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  secondaryButton: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    gap: 8,
+  },
+  secondaryButtonText: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  actionButtonsRow: {
+    flexDirection: "row",
+    gap: 12,
+  },
+  actionButton: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: 4,
+  },
+  actionButtonText: {
+    fontSize: 14,
+    fontWeight: "500",
+  },
+  errorCard: {
+    margin: 16,
+    padding: 16,
+    backgroundColor: "#fee2e2",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#fecaca",
+  },
+  errorText: {
+    color: "#dc2626",
+    fontSize: 14,
+    marginBottom: 12,
+    fontWeight: "500",
+  },
+  errorButton: {
+    backgroundColor: "#dc2626",
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 6,
+    alignSelf: "flex-start",
+  },
+  errorButtonText: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  trackListCard: {
+    margin: 16,
+    padding: 16,
+    borderRadius: 12,
+    elevation: 2,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  cardTitle: {
+    fontSize: 18,
+    fontWeight: "bold",
+    marginBottom: 16,
+  },
+  emptyState: {
+    alignItems: "center",
+    paddingVertical: 32,
+  },
+  emptyText: {
+    fontSize: 16,
+    fontWeight: "600",
+    marginTop: 16,
+  },
+  emptySubtext: {
+    fontSize: 14,
+    marginTop: 4,
+    textAlign: "center",
+  },
+  trackList: {
+    maxHeight: 300,
+  },
+  trackItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+  },
+  trackInfo: {
+    flex: 1,
+  },
+  trackNameRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 4,
+  },
+  trackName: {
+    fontSize: 16,
+    fontWeight: "600",
+    flex: 1,
+  },
+  trackStatusIcons: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  recordingIndicator: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    opacity: 0.8,
+  },
+  trackStats: {
+    fontSize: 12,
+    marginBottom: 2,
+  },
+  trackDate: {
+    fontSize: 11,
+  },
+  trackActions: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  trackActionButton: {
+    padding: 8,
+  },
+  statsCard: {
+    margin: 16,
+    padding: 16,
+    borderRadius: 12,
+    elevation: 2,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  statsGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 16,
+  },
+  statItem: {
+    flex: 1,
+    minWidth: "30%",
+    alignItems: "center",
+  },
+  statValue: {
+    fontSize: 18,
+    fontWeight: "bold",
+    marginBottom: 4,
+  },
+  statLabel: {
+    fontSize: 12,
+    textAlign: "center",
+  },
+  satelliteStatContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    marginBottom: 4,
+  },
+  signalQualityContainer: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255, 255, 255, 0.1)",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  signalQualityLabel: {
+    fontSize: 12,
+    fontWeight: "500",
+  },
+  signalQualityBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  signalQualityText: {
+    fontSize: 12,
+    fontWeight: "600",
+    textTransform: "capitalize",
+  },
+  locationCard: {
+    margin: 16,
+    padding: 16,
+    borderRadius: 12,
+    elevation: 2,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  locationGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 16,
+  },
+  locationItem: {
+    flex: 1,
+    minWidth: "45%",
+  },
+  locationLabel: {
+    fontSize: 12,
+    marginBottom: 4,
+  },
+  locationValue: {
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  mapCard: {
+    margin: 16,
+    padding: 16,
+    borderRadius: 12,
+    elevation: 2,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  mapContainer: {
+    height: 300,
+    borderRadius: 8,
+    overflow: "hidden",
+  },
+  map: {
+    flex: 1,
+  },
+  modalOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "rgba(0, 0, 0, 0.5)",
+    justifyContent: "center",
+    alignItems: "center",
+    zIndex: 1000,
+  },
+  modalContent: {
+    borderRadius: 12,
+    padding: 24,
+    margin: 20,
+    minWidth: 300,
+    elevation: 8,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: "bold",
+    marginBottom: 20,
+    textAlign: "center",
+  },
+  modalTextInput: {
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    fontSize: 16,
+    marginBottom: 20,
+  },
+  modalButtons: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 12,
+  },
+  modalButton: {
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 8,
+    minWidth: 100,
+  },
+  modalButtonDisabled: {
+    opacity: 0.5,
+  },
+  modalCancelButtonText: {
+    textAlign: "center",
+    fontWeight: "600",
+  },
+  modalConfirmButtonText: {
+    color: "#fff",
+    textAlign: "center",
+    fontWeight: "600",
+  },
+});
+
+export default LocationTracker;

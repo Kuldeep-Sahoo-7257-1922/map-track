@@ -48,8 +48,13 @@ import type { LocationPoint, SavedTrack } from "./src/types";
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const DRAWER_WIDTH = SCREEN_WIDTH * 0.8;
 
+// Background tracking state keys
+const BACKGROUND_TRACKING_KEY = "background-tracking-state";
+const BACKGROUND_LOCATIONS_KEY = "background-locations";
+
 const App: React.FC = () => {
   const [isTracking, setIsTracking] = useAsyncSafeState(false);
+  const [isPaused, setIsPaused] = useAsyncSafeState(false);
   const [locations, setLocations] = useAsyncSafeState<LocationPoint[]>([]);
   const [currentLocation, setCurrentLocation] =
     useAsyncSafeState<LocationPoint | null>(null);
@@ -78,6 +83,7 @@ const App: React.FC = () => {
     null
   );
   const autoSaveIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const backgroundSyncIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const { executeAsync } = useAsyncOperation();
   const isUnmountedRef = useRef(false);
   const drawerAnimation = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
@@ -126,6 +132,138 @@ const App: React.FC = () => {
     [executeAsync, handleError]
   );
 
+  // Background state management
+  const saveBackgroundState = useCallback(
+    async (
+      trackId: string,
+      trackName: string,
+      isTracking: boolean,
+      isPaused: boolean
+    ) => {
+      try {
+        const state = {
+          trackId,
+          trackName,
+          isTracking,
+          isPaused,
+          timestamp: Date.now(),
+        };
+        await storageUtils.setItem(
+          BACKGROUND_TRACKING_KEY,
+          JSON.stringify(state)
+        );
+      } catch (error) {
+        console.error("Error saving background state:", error);
+      }
+    },
+    []
+  );
+
+  const clearBackgroundState = useCallback(async () => {
+    try {
+      await storageUtils.removeItem(BACKGROUND_TRACKING_KEY);
+      await storageUtils.removeItem(BACKGROUND_LOCATIONS_KEY);
+    } catch (error) {
+      console.error("Error clearing background state:", error);
+    }
+  }, []);
+
+  const saveLocationsToBackground = useCallback(
+    async (locations: LocationPoint[]) => {
+      try {
+        await storageUtils.setItem(
+          BACKGROUND_LOCATIONS_KEY,
+          JSON.stringify(locations)
+        );
+      } catch (error) {
+        console.error("Error saving locations to background:", error);
+      }
+    },
+    []
+  );
+
+  // Check for background tracking session
+  const checkBackgroundTracking = useCallback(async () => {
+    try {
+      const backgroundState = await storageUtils.getItem(
+        BACKGROUND_TRACKING_KEY
+      );
+      if (backgroundState) {
+        const state = JSON.parse(backgroundState);
+        if (state.isTracking && !state.isPaused) {
+          // Resume the tracking session
+          setCurrentTrackId(state.trackId);
+          setCurrentTrackName(state.trackName);
+          setIsTracking(true);
+          setIsPaused(false);
+
+          // Load background locations
+          const backgroundLocations = await storageUtils.getItem(
+            BACKGROUND_LOCATIONS_KEY
+          );
+          if (backgroundLocations) {
+            const locations = JSON.parse(backgroundLocations);
+            setLocations(locations);
+          }
+
+          // Resume location tracking
+          await startLocationTracking();
+        }
+      }
+    } catch (error) {
+      console.error("Error checking background tracking:", error);
+    }
+  }, [
+    setCurrentTrackId,
+    setCurrentTrackName,
+    setIsTracking,
+    setIsPaused,
+    setLocations,
+  ]);
+
+  // Background sync - periodically sync locations from background storage
+  useEffect(() => {
+    if (isTracking && !isPaused) {
+      backgroundSyncIntervalRef.current = setInterval(async () => {
+        try {
+          const backgroundLocations = await storageUtils.getItem(
+            BACKGROUND_LOCATIONS_KEY
+          );
+          if (backgroundLocations) {
+            const bgLocations = JSON.parse(backgroundLocations);
+            setLocations((prev) => {
+              // Merge background locations with current locations
+              const merged = [...prev];
+              bgLocations.forEach((bgLoc: LocationPoint) => {
+                const exists = merged.some(
+                  (loc) => Math.abs(loc.timestamp - bgLoc.timestamp) < 1000 // Within 1 second
+                );
+                if (!exists) {
+                  merged.push(bgLoc);
+                }
+              });
+              // Sort by timestamp
+              return merged.sort((a, b) => a.timestamp - b.timestamp);
+            });
+          }
+        } catch (error) {
+          console.error("Error syncing background locations:", error);
+        }
+      }, 5000); // Sync every 5 seconds
+    } else {
+      if (backgroundSyncIntervalRef.current) {
+        clearInterval(backgroundSyncIntervalRef.current);
+        backgroundSyncIntervalRef.current = null;
+      }
+    }
+
+    return () => {
+      if (backgroundSyncIntervalRef.current) {
+        clearInterval(backgroundSyncIntervalRef.current);
+      }
+    };
+  }, [isTracking, isPaused, setLocations]);
+
   // Drawer animation functions
   const openDrawer = useCallback(() => {
     setIsDrawerOpen(true);
@@ -162,6 +300,8 @@ const App: React.FC = () => {
         if (!isUnmountedRef.current) {
           setSavedTracks(tracks || []);
           setIsInitialized(true);
+          // Check for background tracking after initialization
+          await checkBackgroundTracking();
         }
       } catch (error) {
         console.error("App initialization error:", error);
@@ -172,7 +312,7 @@ const App: React.FC = () => {
       }
     };
     initializeApp();
-  }, [setSavedTracks, handleError, setIsInitialized]);
+  }, [setSavedTracks, handleError, setIsInitialized, checkBackgroundTracking]);
 
   // Request location permissions
   const requestLocationPermission = useCallback(async (): Promise<boolean> => {
@@ -192,6 +332,14 @@ const App: React.FC = () => {
           "Location permission denied. Please grant location permission."
         );
         return false;
+      }
+
+      // Request background permission for continuous tracking
+      const { status: backgroundStatus } =
+        await Location.requestBackgroundPermissionsAsync();
+      if (backgroundStatus !== "granted") {
+        console.warn("Background location permission not granted");
+        // Continue without background permission
       }
 
       return true;
@@ -241,8 +389,8 @@ const App: React.FC = () => {
     [currentTrackId, currentTrackName, locations, setSavedTracks, handleError]
   );
 
-  // Start tracking location
-  const startTracking = useCallback(async (): Promise<void> => {
+  // Start location tracking (separated from UI state)
+  const startLocationTracking = useCallback(async (): Promise<void> => {
     try {
       console.log("🚀 Starting location tracking...");
 
@@ -252,7 +400,6 @@ const App: React.FC = () => {
       }
 
       setError("");
-      setIsTracking(true);
 
       // Get initial position
       try {
@@ -273,7 +420,11 @@ const App: React.FC = () => {
 
         if (!isUnmountedRef.current) {
           setCurrentLocation(newLocation);
-          setLocations([newLocation]);
+          setLocations((prev) => {
+            const updated = [...prev, newLocation];
+            saveLocationsToBackground(updated);
+            return updated;
+          });
         }
       } catch (locationError) {
         console.error("Initial location error:", locationError);
@@ -302,7 +453,13 @@ const App: React.FC = () => {
               };
 
               setCurrentLocation(newLocation);
-              setLocations((prev) => [...prev, newLocation]);
+              setLocations((prev) => {
+                // Only append to locations if not paused
+                if (isPaused) return prev;
+                const updated = [...prev, newLocation];
+                saveLocationsToBackground(updated);
+                return updated;
+              });
             } catch (error) {
               console.error("Error processing location update:", error);
             }
@@ -319,20 +476,95 @@ const App: React.FC = () => {
       handleError(error, "Start location tracking");
       if (!isUnmountedRef.current) {
         setIsTracking(false);
+        setIsPaused(false);
       }
     }
   }, [
     requestLocationPermission,
     setError,
-    setIsTracking,
     setCurrentLocation,
     setLocations,
     handleError,
+    isPaused,
+    saveLocationsToBackground,
+    setIsTracking,
+    setIsPaused,
+  ]);
+
+  // Start tracking (UI wrapper)
+  const startTracking = useCallback(async (): Promise<void> => {
+    setIsTracking(true);
+    setIsPaused(false);
+    await startLocationTracking();
+  }, [setIsTracking, setIsPaused, startLocationTracking]);
+
+  // Pause tracking
+  const pauseTracking = useCallback(async () => {
+    await safeAsync(async () => {
+      console.log("⏸️ Pausing location tracking...");
+      setIsPaused(true);
+
+      // Update background state
+      if (currentTrackId && currentTrackName) {
+        await saveBackgroundState(currentTrackId, currentTrackName, true, true);
+      }
+
+      // Stop location watching but keep the session
+      if (locationSubscription.current) {
+        try {
+          locationSubscription.current.remove();
+          locationSubscription.current = null;
+        } catch (error) {
+          console.error("Error removing location subscription:", error);
+        }
+      }
+
+      // Save current progress
+      if (currentTrackId && locations.length > 0) {
+        await saveCurrentTrack(false);
+      }
+    }, "Pause tracking");
+  }, [
+    setIsPaused,
+    currentTrackId,
+    currentTrackName,
+    saveBackgroundState,
+    locations,
+    saveCurrentTrack,
+    safeAsync,
+  ]);
+
+  // Resume tracking
+  const resumeTracking = useCallback(async () => {
+    await safeAsync(async () => {
+      console.log("▶️ Resuming location tracking...");
+      setIsPaused(false);
+
+      // Update background state
+      if (currentTrackId && currentTrackName) {
+        await saveBackgroundState(
+          currentTrackId,
+          currentTrackName,
+          true,
+          false
+        );
+      }
+
+      // Restart location tracking
+      await startLocationTracking();
+    }, "Resume tracking");
+  }, [
+    setIsPaused,
+    currentTrackId,
+    currentTrackName,
+    saveBackgroundState,
+    startLocationTracking,
+    safeAsync,
   ]);
 
   // Auto-save system
   useEffect(() => {
-    if (isTracking && currentTrackId && locations.length > 0) {
+    if (isTracking && !isPaused && currentTrackId && locations.length > 0) {
       if (autoSaveIntervalRef.current) {
         clearInterval(autoSaveIntervalRef.current);
       }
@@ -356,7 +588,14 @@ const App: React.FC = () => {
         autoSaveIntervalRef.current = null;
       }
     };
-  }, [isTracking, currentTrackId, locations.length, safeAsync]);
+  }, [
+    isTracking,
+    isPaused,
+    currentTrackId,
+    locations.length,
+    safeAsync,
+    saveCurrentTrack,
+  ]);
 
   // Start new tracking
   const handleStartTracking = useCallback(
@@ -367,6 +606,11 @@ const App: React.FC = () => {
       }
 
       await safeAsync(async () => {
+        // Stop any existing tracking first
+        if (isTracking) {
+          await stopTracking();
+        }
+
         setShowTrackNameDialog(false);
         setCurrentTrackName(trackName.trim());
         const newTrackId = Date.now().toString();
@@ -374,21 +618,31 @@ const App: React.FC = () => {
         setViewingTrack(null);
         setSelectedTracks([]);
         setError("");
+        // Only clear locations for completely new tracks
         setLocations([]);
         setCurrentLocation(null);
+        setIsPaused(false);
+
+        // Save background state
+        await saveBackgroundState(newTrackId, trackName.trim(), true, false);
+
         await startTracking();
       }, "Start tracking");
     },
     [
+      setError,
+      safeAsync,
+      isTracking,
       setShowTrackNameDialog,
       setCurrentTrackName,
       setCurrentTrackId,
       setViewingTrack,
       setSelectedTracks,
-      setError,
       setLocations,
       setCurrentLocation,
-      safeAsync,
+      setIsPaused,
+      saveBackgroundState,
+      startTracking,
     ]
   );
 
@@ -397,6 +651,10 @@ const App: React.FC = () => {
     await safeAsync(async () => {
       console.log("⏹️ Stopping location tracking...");
       setIsTracking(false);
+      setIsPaused(false);
+
+      // Clear background state
+      await clearBackgroundState();
 
       if (locationSubscription.current) {
         try {
@@ -415,8 +673,22 @@ const App: React.FC = () => {
           console.error("Error saving final track:", error);
         }
       }
+
+      // Clear current tracking state
+      setCurrentTrackId(null);
+      setCurrentTrackName("");
     }, "Stop tracking");
-  }, [setIsTracking, currentTrackId, locations, saveCurrentTrack, safeAsync]);
+  }, [
+    setIsTracking,
+    setIsPaused,
+    clearBackgroundState,
+    currentTrackId,
+    locations,
+    saveCurrentTrack,
+    setCurrentTrackId,
+    setCurrentTrackName,
+    safeAsync,
+  ]);
 
   // Toggle track visibility
   const handleViewTrack = useCallback(
@@ -436,39 +708,31 @@ const App: React.FC = () => {
         });
 
         setViewingTrack(null);
-        setCurrentTrackId(null);
-        setCurrentTrackName("");
-        setIsTracking(false);
-
-        if (locationSubscription.current) {
-          locationSubscription.current.remove();
-          locationSubscription.current = null;
-        }
+        // Don't clear current tracking when viewing tracks
       } catch (error) {
         console.error("Toggle track error:", error);
         handleError(error, "Toggle track");
       }
     },
-    [
-      setSelectedTracks,
-      setViewingTrack,
-      setCurrentTrackId,
-      setCurrentTrackName,
-      setIsTracking,
-      handleError,
-    ]
+    [setSelectedTracks, setViewingTrack, handleError]
   );
 
   // Resume existing track
   const handleResumeTrack = useCallback(
     async (track: SavedTrack) => {
       await safeAsync(async () => {
+        // Stop any existing tracking first
+        if (isTracking) {
+          await stopTracking();
+        }
+
         setCurrentTrackId(track.id);
         setCurrentTrackName(track.name);
-        setLocations([...track.locations]);
+        setLocations([...track.locations]); // Keep existing locations
         setViewingTrack(null);
         setSelectedTracks([]);
         setError("");
+        setIsPaused(false);
         closeDrawer();
 
         if (track.locations.length > 0) {
@@ -485,20 +749,28 @@ const App: React.FC = () => {
         const tracks = await storageUtils.getAllTracks();
         setSavedTracks(tracks || []);
 
+        // Save background state
+        await saveBackgroundState(track.id, track.name, true, false);
+
         await startTracking();
       }, "Resume track");
     },
     [
+      safeAsync,
+      isTracking,
+      stopTracking,
       setCurrentTrackId,
       setCurrentTrackName,
       setLocations,
       setViewingTrack,
       setSelectedTracks,
       setError,
+      setIsPaused,
       closeDrawer,
       setCurrentLocation,
       setSavedTracks,
-      safeAsync,
+      saveBackgroundState,
+      startTracking,
     ]
   );
 
@@ -722,6 +994,9 @@ const App: React.FC = () => {
     showAboutDialog,
     isTracking,
     closeDrawer,
+    setShowTrackNameDialog,
+    setShowAboutDialog,
+    stopTracking,
   ]);
 
   // Cleanup on unmount
@@ -740,6 +1015,9 @@ const App: React.FC = () => {
       }
       if (autoSaveIntervalRef.current) {
         clearInterval(autoSaveIntervalRef.current);
+      }
+      if (backgroundSyncIntervalRef.current) {
+        clearInterval(backgroundSyncIntervalRef.current);
       }
     };
   }, []);
@@ -810,7 +1088,7 @@ const App: React.FC = () => {
                           : locations || []
                       }
                       currentLocation={currentLocation}
-                      isTracking={isTracking}
+                      isTracking={isTracking && !isPaused}
                       isDarkTheme={isDarkTheme}
                       style={styles.fullMap}
                       showLayerSelector={true}
@@ -963,14 +1241,20 @@ const App: React.FC = () => {
                           styles.statValue,
                           {
                             color: isTracking
-                              ? theme.colors.accent
+                              ? isPaused
+                                ? "#f59e0b"
+                                : theme.colors.accent
                               : isDarkTheme
                               ? "#fff"
                               : theme.colors.text,
                           },
                         ]}
                       >
-                        {isTracking ? "Recording" : "Stopped"}
+                        {isTracking
+                          ? isPaused
+                            ? "Paused"
+                            : "Recording"
+                          : "Stopped"}
                       </Text>
                       <Text
                         style={[
@@ -1154,14 +1438,23 @@ const App: React.FC = () => {
                         setShowTrackNameDialog(true);
                       }}
                     />
+                  ) : isPaused ? (
+                    <FAB
+                      icon="play"
+                      style={[
+                        styles.playButton,
+                        { backgroundColor: theme.colors.accent },
+                      ]}
+                      onPress={resumeTracking}
+                    />
                   ) : (
                     <FAB
                       icon="pause"
                       style={[
                         styles.playButton,
-                        { backgroundColor: "#ef4444" },
+                        { backgroundColor: "#f59e0b" },
                       ]}
-                      onPress={stopTracking}
+                      onPress={pauseTracking}
                     />
                   )}
                 </View>
@@ -1244,21 +1537,85 @@ const App: React.FC = () => {
                     </View>
 
                     {/* Quick Actions */}
-                    <TouchableOpacity
-                      style={[
-                        styles.compactActionButton,
-                        { backgroundColor: theme.colors.accent },
-                      ]}
-                      onPress={() => {
-                        setTrackNameInput(
-                          `Track ${new Date().toLocaleDateString()}`
-                        );
-                        setShowTrackNameDialog(true);
-                        closeDrawer();
-                      }}
-                    >
-                      <MaterialIcons name="play-arrow" size={16} color="#fff" />
-                    </TouchableOpacity>
+                    {!isTracking ? (
+                      <TouchableOpacity
+                        style={[
+                          styles.compactActionButton,
+                          { backgroundColor: theme.colors.accent },
+                        ]}
+                        onPress={() => {
+                          setTrackNameInput(
+                            `Track ${new Date().toLocaleDateString()}`
+                          );
+                          setShowTrackNameDialog(true);
+                          closeDrawer();
+                        }}
+                      >
+                        <MaterialIcons
+                          name="play-arrow"
+                          size={16}
+                          color="#fff"
+                        />
+                      </TouchableOpacity>
+                    ) : isPaused ? (
+                      <>
+                        <TouchableOpacity
+                          style={[
+                            styles.compactActionButton,
+                            { backgroundColor: theme.colors.accent },
+                          ]}
+                          onPress={() => {
+                            resumeTracking();
+                            closeDrawer();
+                          }}
+                        >
+                          <MaterialIcons
+                            name="play-arrow"
+                            size={16}
+                            color="#fff"
+                          />
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[
+                            styles.compactActionButton,
+                            { backgroundColor: "#ef4444" },
+                          ]}
+                          onPress={() => {
+                            stopTracking();
+                            closeDrawer();
+                          }}
+                        >
+                          <MaterialIcons name="stop" size={16} color="#fff" />
+                        </TouchableOpacity>
+                      </>
+                    ) : (
+                      <>
+                        <TouchableOpacity
+                          style={[
+                            styles.compactActionButton,
+                            { backgroundColor: "#f59e0b" },
+                          ]}
+                          onPress={() => {
+                            pauseTracking();
+                            closeDrawer();
+                          }}
+                        >
+                          <MaterialIcons name="pause" size={16} color="#fff" />
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[
+                            styles.compactActionButton,
+                            { backgroundColor: "#ef4444" },
+                          ]}
+                          onPress={() => {
+                            stopTracking();
+                            closeDrawer();
+                          }}
+                        >
+                          <MaterialIcons name="stop" size={16} color="#fff" />
+                        </TouchableOpacity>
+                      </>
+                    )}
 
                     <TouchableOpacity
                       style={[
@@ -1283,6 +1640,54 @@ const App: React.FC = () => {
                       <MaterialIcons name="info" size={16} color="#fff" />
                     </TouchableOpacity>
                   </View>
+
+                  {/* Current Track Status */}
+                  {isTracking && (
+                    <View style={styles.currentTrackStatus}>
+                      <View style={styles.trackStatusRow}>
+                        <View
+                          style={[
+                            styles.trackStatusIndicator,
+                            {
+                              backgroundColor: isPaused
+                                ? "#f59e0b"
+                                : theme.colors.accent,
+                            },
+                          ]}
+                        />
+                        <Text
+                          style={[
+                            styles.trackStatusText,
+                            { color: theme.colors.text },
+                          ]}
+                        >
+                          {currentTrackName} •{" "}
+                          {isPaused ? "Paused" : "Recording"}
+                        </Text>
+                      </View>
+                      <Text
+                        style={[
+                          styles.trackStatusStats,
+                          { color: isDarkTheme ? "#ccc" : "#64748b" },
+                        ]}
+                      >
+                        {locations.length} points •{" "}
+                        {totalDistance > 1000
+                          ? `${(totalDistance / 1000).toFixed(2)} km`
+                          : `${Math.round(totalDistance)} m`}
+                      </Text>
+                      {!isPaused && (
+                        <Text
+                          style={[
+                            styles.trackStatusStats,
+                            { color: theme.colors.accent, fontSize: 10 },
+                          ]}
+                        >
+                          Background tracking enabled
+                        </Text>
+                      )}
+                    </View>
+                  )}
                 </View>
 
                 {/* Search Bar */}
@@ -1331,6 +1736,9 @@ const App: React.FC = () => {
                     const isSelected = selectedTracks.some(
                       (t) => t.id === track.id
                     );
+                    const isCurrentTrack = currentTrackId === track.id;
+                    const isCurrentlyRecording = isCurrentTrack && isTracking;
+
                     return (
                       <TouchableOpacity
                         key={track.id}
@@ -1342,6 +1750,13 @@ const App: React.FC = () => {
                               : theme.colors.primary + "15",
                             borderLeftWidth: 4,
                             borderLeftColor: theme.colors.primary,
+                          },
+                          isCurrentlyRecording && {
+                            backgroundColor: isDarkTheme
+                              ? theme.colors.accent + "20"
+                              : theme.colors.accent + "10",
+                            borderLeftWidth: 4,
+                            borderLeftColor: theme.colors.accent,
                           },
                           { borderBottomColor: theme.colors.outline },
                         ]}
@@ -1358,13 +1773,38 @@ const App: React.FC = () => {
                             >
                               {track.name}
                             </Text>
-                            {isSelected && (
-                              <MaterialIcons
-                                name="visibility"
-                                size={16}
-                                color={theme.colors.primary}
-                              />
-                            )}
+                            <View style={styles.trackStatusIcons}>
+                              {isSelected && (
+                                <MaterialIcons
+                                  name="visibility"
+                                  size={16}
+                                  color={theme.colors.primary}
+                                />
+                              )}
+                              {isCurrentlyRecording && (
+                                <>
+                                  <MaterialIcons
+                                    name={
+                                      isPaused ? "pause" : "fiber-manual-record"
+                                    }
+                                    size={16}
+                                    color={
+                                      isPaused ? "#f59e0b" : theme.colors.accent
+                                    }
+                                  />
+                                  {!isPaused && (
+                                    <View
+                                      style={[
+                                        styles.recordingIndicator,
+                                        {
+                                          backgroundColor: theme.colors.accent,
+                                        },
+                                      ]}
+                                    />
+                                  )}
+                                </>
+                              )}
+                            </View>
                           </View>
                           <Text
                             style={[
@@ -1384,34 +1824,78 @@ const App: React.FC = () => {
                             ]}
                           >
                             {new Date(track.createdAt).toLocaleDateString()}
+                            {isCurrentlyRecording && (
+                              <Text style={{ color: theme.colors.accent }}>
+                                {" "}
+                                • {isPaused ? "Paused" : "Recording"}
+                              </Text>
+                            )}
                           </Text>
                         </View>
 
                         <View style={styles.drawerTrackActions}>
-                          <TouchableOpacity
-                            style={styles.drawerActionButton}
-                            onPress={(e) => {
-                              e.stopPropagation();
-                              handleResumeTrack(track);
-                            }}
-                          >
-                            <MaterialIcons
-                              name="play-arrow"
-                              size={18}
-                              color={theme.colors.accent}
-                            />
-                          </TouchableOpacity>
+                          {isCurrentlyRecording ? (
+                            isPaused ? (
+                              <TouchableOpacity
+                                style={styles.drawerActionButton}
+                                onPress={(e) => {
+                                  e.stopPropagation();
+                                  resumeTracking();
+                                  closeDrawer();
+                                }}
+                              >
+                                <MaterialIcons
+                                  name="play-arrow"
+                                  size={18}
+                                  color={theme.colors.accent}
+                                />
+                              </TouchableOpacity>
+                            ) : (
+                              <TouchableOpacity
+                                style={styles.drawerActionButton}
+                                onPress={(e) => {
+                                  e.stopPropagation();
+                                  pauseTracking();
+                                }}
+                              >
+                                <MaterialIcons
+                                  name="pause"
+                                  size={18}
+                                  color="#f59e0b"
+                                />
+                              </TouchableOpacity>
+                            )
+                          ) : (
+                            <TouchableOpacity
+                              style={styles.drawerActionButton}
+                              onPress={(e) => {
+                                e.stopPropagation();
+                                handleResumeTrack(track);
+                              }}
+                            >
+                              <MaterialIcons
+                                name="play-arrow"
+                                size={18}
+                                color={theme.colors.accent}
+                              />
+                            </TouchableOpacity>
+                          )}
                           <TouchableOpacity
                             style={styles.drawerActionButton}
                             onPress={(e) => {
                               e.stopPropagation();
                               downloadKML(track);
                             }}
+                            disabled={isCurrentlyRecording && !isPaused}
                           >
                             <MaterialIcons
                               name="download"
                               size={18}
-                              color="#f59e0b"
+                              color={
+                                isCurrentlyRecording && !isPaused
+                                  ? "#888"
+                                  : "#f59e0b"
+                              }
                             />
                           </TouchableOpacity>
                           <TouchableOpacity
@@ -1420,11 +1904,12 @@ const App: React.FC = () => {
                               e.stopPropagation();
                               deleteTrack(track.id);
                             }}
+                            disabled={isCurrentlyRecording}
                           >
                             <MaterialIcons
                               name="delete"
                               size={18}
-                              color="#ef4444"
+                              color={isCurrentlyRecording ? "#888" : "#ef4444"}
                             />
                           </TouchableOpacity>
                         </View>
@@ -1643,6 +2128,7 @@ const App: React.FC = () => {
                           • Real-time GPS tracking{"\n"}• Multiple map layers
                           {"\n"}• Track import/export{"\n"}• Multi-track viewing
                           {"\n"}• Dark/Light themes{"\n"}• Background tracking
+                          {"\n"}• Pause/Resume functionality
                         </Text>
                       </View>
                     </View>
@@ -1887,6 +2373,32 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.2,
     shadowRadius: 2,
   },
+  currentTrackStatus: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255, 255, 255, 0.1)",
+  },
+  trackStatusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 4,
+  },
+  trackStatusIndicator: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 8,
+  },
+  trackStatusText: {
+    fontSize: 12,
+    fontWeight: "600",
+    flex: 1,
+  },
+  trackStatusStats: {
+    fontSize: 10,
+    marginLeft: 16,
+  },
   drawerSearchContainer: {
     paddingHorizontal: 16,
     paddingVertical: 8,
@@ -1938,6 +2450,17 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "600",
     flex: 1,
+  },
+  trackStatusIcons: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  recordingIndicator: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    opacity: 0.8,
   },
   drawerTrackStats: {
     fontSize: 11,

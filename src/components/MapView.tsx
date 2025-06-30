@@ -375,6 +375,13 @@ const MapComponent: React.FC<Props> = ({
     // Go to current location function
     window.goToCurrentLocation = function() {
       if (navigator.geolocation) {
+        // Show loading state
+        const btn = document.getElementById('currentLocationBtn');
+        if (btn) {
+          btn.innerHTML = '⌛';
+          btn.style.opacity = '0.7';
+        }
+        
         navigator.geolocation.getCurrentPosition(
           function(position) {
             userCurrentLocation = {
@@ -384,11 +391,49 @@ const MapComponent: React.FC<Props> = ({
             
             if (map && userCurrentLocation) {
               map.setView([userCurrentLocation.lat, userCurrentLocation.lng], 16);
+              
+              // Add a temporary marker to show current location
+              const currentLocationIcon = window.L.divIcon({
+                html: '<div style="background-color: #3b82f6; width: 16px; height: 16px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 6px rgba(0,0,0,0.4); animation: pulse 2s infinite;"></div><style>@keyframes pulse { 0% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.2); opacity: 0.7; } 100% { transform: scale(1); opacity: 1; } }</style>',
+                className: 'current-location-marker',
+                iconSize: [16, 16],
+                iconAnchor: [8, 8]
+              });
+              
+              const currentMarker = window.L.marker([userCurrentLocation.lat, userCurrentLocation.lng], { 
+                icon: currentLocationIcon 
+              }).addTo(map);
+              
+              // Remove the marker after 3 seconds
+              setTimeout(() => {
+                if (map && currentMarker) {
+                  map.removeLayer(currentMarker);
+                }
+              }, 3000);
+            }
+            
+            // Reset button
+            if (btn) {
+              btn.innerHTML = '📍';
+              btn.style.opacity = '1';
             }
           },
           function(error) {
             console.error('Error getting current location:', error);
-            alert('Could not get your current location. Please check location permissions.');
+            
+            // Show error message
+            if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                type: 'locationError',
+                message: 'Could not get your current location. Please check location permissions.'
+              }));
+            }
+            
+            // Reset button
+            if (btn) {
+              btn.innerHTML = '📍';
+              btn.style.opacity = '1';
+            }
           },
           {
             enableHighAccuracy: true,
@@ -397,7 +442,12 @@ const MapComponent: React.FC<Props> = ({
           }
         );
       } else {
-        alert('Geolocation is not supported by this browser.');
+        if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'locationError',
+            message: 'Geolocation is not supported by this browser.'
+          }));
+        }
       }
     }
 
@@ -486,11 +536,8 @@ const MapComponent: React.FC<Props> = ({
         // Show/hide current location button based on whether there are tracks
         const currentLocationBtn = document.getElementById('currentLocationBtn');
         if (currentLocationBtn) {
-          if (allTracksData && allTracksData.length > 0) {
-            currentLocationBtn.style.display = 'none';
-          } else {
-            currentLocationBtn.style.display = 'flex';
-          }
+          // Always show the current location button
+          currentLocationBtn.style.display = 'flex';
         }
 
         // Clear existing track
@@ -515,6 +562,20 @@ const MapComponent: React.FC<Props> = ({
         let colorIndex = 0;
         let allCoords = [];
 
+        // Function to calculate distance between two points
+        const calculateDistance = function(lat1, lng1, lat2, lng2) {
+          const R = 6371e3; // Earth's radius in meters
+          const φ1 = lat1 * Math.PI/180;
+          const φ2 = lat2 * Math.PI/180;
+          const Δφ = (lat2-lat1) * Math.PI/180;
+          const Δλ = (lng2-lng1) * Math.PI/180;
+          const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+                    Math.cos(φ1) * Math.cos(φ2) *
+                    Math.sin(Δλ/2) * Math.sin(Δλ/2);
+          const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+          return R * c;
+        };
+
         // Render each track with different colors
         Object.keys(trackGroups).forEach(trackId => {
           const trackData = trackGroups[trackId];
@@ -524,6 +585,9 @@ const MapComponent: React.FC<Props> = ({
 
           // Add track polylines
           if (locations.length > 1) {
+            let cumulativeDistance = 0;
+            let lastArrowDistance = 0;
+            
             for (let i = 1; i < locations.length; i++) {
               const prev = locations[i - 1];
               const curr = locations[i];
@@ -531,6 +595,9 @@ const MapComponent: React.FC<Props> = ({
               if (!prev || !curr || !prev.latitude || !prev.longitude || !curr.latitude || !curr.longitude) {
                 continue;
               }
+
+              const segmentDistance = calculateDistance(prev.latitude, prev.longitude, curr.latitude, curr.longitude);
+              cumulativeDistance += segmentDistance;
 
               const segment = window.L.polyline([
                 [prev.latitude, prev.longitude],
@@ -549,6 +616,7 @@ const MapComponent: React.FC<Props> = ({
                       <strong>Time:</strong> \${new Date(prev.timestamp).toLocaleTimeString()} - \${new Date(curr.timestamp).toLocaleTimeString()}
                     </div>
                     <div><strong>Speed:</strong> \${((curr.speed || 0) * 3.6).toFixed(1)} km/h</div>
+                    <div><strong>Distance:</strong> \${(cumulativeDistance / 1000).toFixed(2)} km</div>
                     <div>
                       <strong>Coordinates:</strong> \${curr.latitude.toFixed(6)}, \${curr.longitude.toFixed(6)}
                     </div>
@@ -557,6 +625,43 @@ const MapComponent: React.FC<Props> = ({
               \`);
 
               trackLayerGroup.addLayer(segment);
+
+              // Add direction arrows every 500 meters (0.5 km)
+              if (cumulativeDistance - lastArrowDistance >= 500) {
+                const bearing = window.calculateBearing(prev.latitude, prev.longitude, curr.latitude, curr.longitude);
+                
+                // Calculate position along the segment for arrow placement (closer to current point)
+                const ratio = 0.7; // Place arrow 70% along the segment
+                const arrowLat = prev.latitude + (curr.latitude - prev.latitude) * ratio;
+                const arrowLng = prev.longitude + (curr.longitude - prev.longitude) * ratio;
+
+                const directionArrow = window.L.divIcon({
+                  html: \`<div style="transform: rotate(\${bearing}deg); width: 20px; height: 20px; display: flex; align-items: center; justify-content: center;">
+           <svg width="20" height="20" viewBox="0 0 20 20" style="filter: drop-shadow(0 2px 3px rgba(0,0,0,0.5));">
+             <path d="M10 2 L16 14 L10 11 L4 14 Z" fill="\${trackColor}" stroke="white" strokeWidth="1.5"/>
+           </svg>
+         </div>\`,
+                  className: "direction-arrow-marker",
+                  iconSize: [20, 20],
+                  iconAnchor: [10, 10],
+                });
+
+                const arrowMarker = window.L.marker([arrowLat, arrowLng], { icon: directionArrow })
+                  .bindPopup(\`
+      <div>
+        <h4 style="margin: 0 0 8px 0; font-weight: bold; color: \${trackColor};">📍 \${trackData.name}</h4>
+        <div style="font-size: 12px; line-height: 1.4;">
+          <div><strong>📏 Distance:</strong> \${(cumulativeDistance / 1000).toFixed(2)} km</div>
+          <div><strong>🧭 Direction:</strong> \${bearing.toFixed(0)}°</div>
+          <div><strong>⚡ Speed:</strong> \${((curr.speed || 0) * 3.6).toFixed(1)} km/h</div>
+          <div><strong>⏰ Time:</strong> \${new Date(curr.timestamp).toLocaleTimeString()}</div>
+        </div>
+      </div>
+    \`);
+  
+                trackLayerGroup.addLayer(arrowMarker);
+                lastArrowDistance = cumulativeDistance;
+              }
             }
 
             // Add start marker
@@ -609,6 +714,7 @@ const MapComponent: React.FC<Props> = ({
                     <div><strong>Time:</strong> \${new Date(lastLocation.timestamp).toLocaleString()}</div>
                     <div><strong>Coordinates:</strong> \${lastLocation.latitude.toFixed(6)}, \${lastLocation.longitude.toFixed(6)}</div>
                     <div><strong>Direction:</strong> \${bearing.toFixed(0)}°</div>
+                    <div><strong>Total Distance:</strong> \${(cumulativeDistance / 1000).toFixed(2)} km</div>
                   </div>
                 </div>
               \`);
