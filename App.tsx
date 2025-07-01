@@ -23,7 +23,6 @@ import {
   Switch,
 } from "react-native-paper";
 import { MaterialIcons } from "@expo/vector-icons";
-import * as Location from "expo-location";
 import * as FileSystem from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import * as DocumentPicker from "expo-document-picker";
@@ -43,14 +42,14 @@ import {
   useAsyncSafeState,
   useAsyncOperation,
 } from "./src/hooks/useAsyncSafeState";
+import {
+  LocationService,
+  BackgroundLocationService,
+} from "./src/services/LocationService";
 import type { LocationPoint, SavedTrack } from "./src/types";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const DRAWER_WIDTH = SCREEN_WIDTH * 0.8;
-
-// Background tracking state keys
-const BACKGROUND_TRACKING_KEY = "background-tracking-state";
-const BACKGROUND_LOCATIONS_KEY = "background-locations";
 
 const App: React.FC = () => {
   const [isTracking, setIsTracking] = useAsyncSafeState(false);
@@ -79,14 +78,22 @@ const App: React.FC = () => {
   const [searchQuery, setSearchQuery] = useAsyncSafeState("");
   const [isDrawerOpen, setIsDrawerOpen] = useAsyncSafeState(false);
 
-  const locationSubscription = useRef<Location.LocationSubscription | null>(
-    null
-  );
+  // Enhanced GPS Status states
+  const [gpsStatus, setGpsStatus] = useAsyncSafeState<
+    "searching" | "connected" | "poor" | "disconnected"
+  >("disconnected");
+  const [satelliteInfo, setSatelliteInfo] = useAsyncSafeState<{
+    total: number;
+    used: number;
+    constellations: string[];
+  }>({ total: 0, used: 0, constellations: [] });
+  const [lastLocationTime, setLastLocationTime] = useAsyncSafeState<number>(0);
+
   const autoSaveIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const backgroundSyncIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const { executeAsync } = useAsyncOperation();
   const isUnmountedRef = useRef(false);
   const drawerAnimation = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
+  const locationService = useRef(LocationService.getInstance());
 
   const AUTO_SAVE_INTERVAL = 10000;
 
@@ -132,137 +139,57 @@ const App: React.FC = () => {
     [executeAsync, handleError]
   );
 
-  // Background state management
-  const saveBackgroundState = useCallback(
-    async (
-      trackId: string,
-      trackName: string,
-      isTracking: boolean,
-      isPaused: boolean
-    ) => {
-      try {
-        const state = {
-          trackId,
-          trackName,
-          isTracking,
-          isPaused,
-          timestamp: Date.now(),
-        };
-        await storageUtils.setItem(
-          BACKGROUND_TRACKING_KEY,
-          JSON.stringify(state)
-        );
-      } catch (error) {
-        console.error("Error saving background state:", error);
+  // Update GPS status based on location updates and satellite info
+  const updateGpsStatus = useCallback(
+    (location: LocationPoint, satInfo: any) => {
+      const now = Date.now();
+      setLastLocationTime(now);
+      setSatelliteInfo(satInfo);
+
+      const accuracy = location.accuracy || 999;
+      const usedSatellites = satInfo.used || 0;
+
+      // Determine GPS status based on accuracy and satellite count
+      if (accuracy <= 5 && usedSatellites >= 8) {
+        setGpsStatus("connected");
+      } else if (accuracy <= 20 && usedSatellites >= 4) {
+        setGpsStatus("poor");
+      } else if (usedSatellites >= 3) {
+        setGpsStatus("searching");
+      } else {
+        setGpsStatus("disconnected");
       }
     },
-    []
+    [setGpsStatus, setSatelliteInfo, setLastLocationTime]
   );
 
-  const clearBackgroundState = useCallback(async () => {
-    try {
-      await storageUtils.removeItem(BACKGROUND_TRACKING_KEY);
-      await storageUtils.removeItem(BACKGROUND_LOCATIONS_KEY);
-    } catch (error) {
-      console.error("Error clearing background state:", error);
-    }
-  }, []);
-
-  const saveLocationsToBackground = useCallback(
-    async (locations: LocationPoint[]) => {
-      try {
-        await storageUtils.setItem(
-          BACKGROUND_LOCATIONS_KEY,
-          JSON.stringify(locations)
-        );
-      } catch (error) {
-        console.error("Error saving locations to background:", error);
-      }
-    },
-    []
-  );
-
-  // Check for background tracking session
-  const checkBackgroundTracking = useCallback(async () => {
-    try {
-      const backgroundState = await storageUtils.getItem(
-        BACKGROUND_TRACKING_KEY
-      );
-      if (backgroundState) {
-        const state = JSON.parse(backgroundState);
-        if (state.isTracking && !state.isPaused) {
-          // Resume the tracking session
-          setCurrentTrackId(state.trackId);
-          setCurrentTrackName(state.trackName);
-          setIsTracking(true);
-          setIsPaused(false);
-
-          // Load background locations
-          const backgroundLocations = await storageUtils.getItem(
-            BACKGROUND_LOCATIONS_KEY
-          );
-          if (backgroundLocations) {
-            const locations = JSON.parse(backgroundLocations);
-            setLocations(locations);
-          }
-
-          // Resume location tracking
-          await startLocationTracking();
-        }
-      }
-    } catch (error) {
-      console.error("Error checking background tracking:", error);
-    }
-  }, [
-    setCurrentTrackId,
-    setCurrentTrackName,
-    setIsTracking,
-    setIsPaused,
-    setLocations,
-  ]);
-
-  // Background sync - periodically sync locations from background storage
+  // Monitor GPS status
   useEffect(() => {
-    if (isTracking && !isPaused) {
-      backgroundSyncIntervalRef.current = setInterval(async () => {
-        try {
-          const backgroundLocations = await storageUtils.getItem(
-            BACKGROUND_LOCATIONS_KEY
-          );
-          if (backgroundLocations) {
-            const bgLocations = JSON.parse(backgroundLocations);
-            setLocations((prev) => {
-              // Merge background locations with current locations
-              const merged = [...prev];
-              bgLocations.forEach((bgLoc: LocationPoint) => {
-                const exists = merged.some(
-                  (loc) => Math.abs(loc.timestamp - bgLoc.timestamp) < 1000 // Within 1 second
-                );
-                if (!exists) {
-                  merged.push(bgLoc);
-                }
-              });
-              // Sort by timestamp
-              return merged.sort((a, b) => a.timestamp - b.timestamp);
-            });
-          }
-        } catch (error) {
-          console.error("Error syncing background locations:", error);
-        }
-      }, 5000); // Sync every 5 seconds
-    } else {
-      if (backgroundSyncIntervalRef.current) {
-        clearInterval(backgroundSyncIntervalRef.current);
-        backgroundSyncIntervalRef.current = null;
-      }
+    if (!isTracking) {
+      setGpsStatus("disconnected");
+      setSatelliteInfo({ total: 0, used: 0, constellations: [] });
+      return;
     }
 
-    return () => {
-      if (backgroundSyncIntervalRef.current) {
-        clearInterval(backgroundSyncIntervalRef.current);
+    const statusInterval = setInterval(() => {
+      const timeSinceLastLocation = Date.now() - lastLocationTime;
+
+      if (timeSinceLastLocation > 30000) {
+        // No location for 30 seconds
+        setGpsStatus("disconnected");
+        setSatelliteInfo({ total: 0, used: 0, constellations: [] });
+      } else if (timeSinceLastLocation > 15000) {
+        // No location for 15 seconds
+        setGpsStatus("searching");
+        setSatelliteInfo((prev) => ({
+          ...prev,
+          used: Math.max(0, prev.used - 2),
+        }));
       }
-    };
-  }, [isTracking, isPaused, setLocations]);
+    }, 5000);
+
+    return () => clearInterval(statusInterval);
+  }, [isTracking, lastLocationTime, setGpsStatus, setSatelliteInfo]);
 
   // Drawer animation functions
   const openDrawer = useCallback(() => {
@@ -291,18 +218,45 @@ const App: React.FC = () => {
     setShowAboutDialog(false);
   }, [setSelectedTracks, setViewingTrack, setShowAboutDialog]);
 
-  // Initialize app
+  // Initialize app and location service
   useEffect(() => {
     const initializeApp = async () => {
       try {
         console.log("Initializing app...");
+
+        // Load saved tracks
         const tracks = await storageUtils.getAllTracks();
         if (!isUnmountedRef.current) {
           setSavedTracks(tracks || []);
-          setIsInitialized(true);
-          // Check for background tracking after initialization
-          await checkBackgroundTracking();
         }
+
+        // Setup location service callbacks
+        const locationService = LocationService.getInstance();
+
+        locationService.addLocationCallback(
+          (location: LocationPoint, satInfo: any) => {
+            if (!isUnmountedRef.current) {
+              setCurrentLocation(location);
+              updateGpsStatus(location, satInfo);
+
+              // Only add to locations if tracking and not paused
+              if (isTracking && !isPaused) {
+                setLocations((prev) => [...prev, location]);
+              }
+            }
+          }
+        );
+
+        locationService.addErrorCallback((errorMessage: string) => {
+          if (!isUnmountedRef.current) {
+            setError(errorMessage);
+            setGpsStatus("disconnected");
+            setSatelliteInfo({ total: 0, used: 0, constellations: [] });
+          }
+        });
+
+        setIsInitialized(true);
+        console.log("✅ App initialized successfully");
       } catch (error) {
         console.error("App initialization error:", error);
         handleError(error, "App initialization");
@@ -311,44 +265,21 @@ const App: React.FC = () => {
         }
       }
     };
+
     initializeApp();
-  }, [setSavedTracks, handleError, setIsInitialized, checkBackgroundTracking]);
-
-  // Request location permissions
-  const requestLocationPermission = useCallback(async (): Promise<boolean> => {
-    try {
-      const isLocationEnabled = await Location.hasServicesEnabledAsync();
-      if (!isLocationEnabled) {
-        setError(
-          "Location services are disabled. Please enable location services."
-        );
-        return false;
-      }
-
-      const { status: foregroundStatus } =
-        await Location.requestForegroundPermissionsAsync();
-      if (foregroundStatus !== "granted") {
-        setError(
-          "Location permission denied. Please grant location permission."
-        );
-        return false;
-      }
-
-      // Request background permission for continuous tracking
-      const { status: backgroundStatus } =
-        await Location.requestBackgroundPermissionsAsync();
-      if (backgroundStatus !== "granted") {
-        console.warn("Background location permission not granted");
-        // Continue without background permission
-      }
-
-      return true;
-    } catch (error) {
-      console.error("Permission request error:", error);
-      handleError(error, "Location permission request");
-      return false;
-    }
-  }, [setError, handleError]);
+  }, [
+    setSavedTracks,
+    handleError,
+    setIsInitialized,
+    setCurrentLocation,
+    updateGpsStatus,
+    isTracking,
+    isPaused,
+    setLocations,
+    setError,
+    setGpsStatus,
+    setSatelliteInfo,
+  ]);
 
   // Save current track to storage
   const saveCurrentTrack = useCallback(
@@ -389,135 +320,123 @@ const App: React.FC = () => {
     [currentTrackId, currentTrackName, locations, setSavedTracks, handleError]
   );
 
-  // Start location tracking (separated from UI state)
-  const startLocationTracking = useCallback(async (): Promise<void> => {
-    try {
-      console.log("🚀 Starting location tracking...");
-
-      const hasPermission = await requestLocationPermission();
-      if (!hasPermission) {
+  // Start new tracking
+  const handleStartTracking = useCallback(
+    async (trackName: string) => {
+      if (!trackName.trim()) {
+        setError("Please enter a track name");
         return;
       }
 
-      setError("");
-
-      // Get initial position
-      try {
-        const initialLocation = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Balanced,
-          timeout: 15000,
-        });
-
-        const newLocation: LocationPoint = {
-          latitude: initialLocation.coords.latitude,
-          longitude: initialLocation.coords.longitude,
-          timestamp: Date.now(),
-          accuracy: initialLocation.coords.accuracy || undefined,
-          speed: initialLocation.coords.speed || undefined,
-          heading: initialLocation.coords.heading || undefined,
-          altitude: initialLocation.coords.altitude || undefined,
-        };
-
-        if (!isUnmountedRef.current) {
-          setCurrentLocation(newLocation);
-          setLocations((prev) => {
-            const updated = [...prev, newLocation];
-            saveLocationsToBackground(updated);
-            return updated;
-          });
+      await safeAsync(async () => {
+        // Stop any existing tracking first
+        if (isTracking) {
+          await locationService.current.stopTracking();
+          setIsTracking(false);
         }
-      } catch (locationError) {
-        console.error("Initial location error:", locationError);
-      }
 
-      // Start watching position
-      try {
-        locationSubscription.current = await Location.watchPositionAsync(
-          {
-            accuracy: Location.Accuracy.Balanced,
-            timeInterval: 5000,
-            distanceInterval: 5,
-          },
-          (location) => {
-            try {
-              if (isUnmountedRef.current) return;
-
-              const newLocation: LocationPoint = {
-                latitude: location.coords.latitude,
-                longitude: location.coords.longitude,
-                timestamp: Date.now(),
-                accuracy: location.coords.accuracy || undefined,
-                speed: location.coords.speed || undefined,
-                heading: location.coords.heading || undefined,
-                altitude: location.coords.altitude || undefined,
-              };
-
-              setCurrentLocation(newLocation);
-              setLocations((prev) => {
-                // Only append to locations if not paused
-                if (isPaused) return prev;
-                const updated = [...prev, newLocation];
-                saveLocationsToBackground(updated);
-                return updated;
-              });
-            } catch (error) {
-              console.error("Error processing location update:", error);
-            }
-          }
-        );
-      } catch (watchError) {
-        console.error("Watch position error:", watchError);
-        throw watchError;
-      }
-
-      console.log("✅ Location tracking started successfully");
-    } catch (error) {
-      console.error("Start tracking error:", error);
-      handleError(error, "Start location tracking");
-      if (!isUnmountedRef.current) {
-        setIsTracking(false);
+        setShowTrackNameDialog(false);
+        setCurrentTrackName(trackName.trim());
+        const newTrackId = Date.now().toString();
+        setCurrentTrackId(newTrackId);
+        setViewingTrack(null);
+        setSelectedTracks([]);
+        setError("");
+        setLocations([]);
+        setCurrentLocation(null);
         setIsPaused(false);
+        setGpsStatus("searching");
+        setSatelliteInfo({ total: 0, used: 0, constellations: ["GPS"] });
+
+        // Start location service
+        const success = await locationService.current.startTracking();
+        if (success) {
+          setIsTracking(true);
+
+          // Start background tracking
+          await BackgroundLocationService.startBackgroundLocationTracking(
+            newTrackId,
+            trackName.trim()
+          );
+
+          console.log("✅ Tracking started successfully");
+        } else {
+          setError(
+            "Failed to start GPS tracking. Please check your location settings."
+          );
+        }
+      }, "Start tracking");
+    },
+    [
+      setError,
+      safeAsync,
+      isTracking,
+      setShowTrackNameDialog,
+      setCurrentTrackName,
+      setCurrentTrackId,
+      setViewingTrack,
+      setSelectedTracks,
+      setLocations,
+      setCurrentLocation,
+      setIsPaused,
+      setGpsStatus,
+      setSatelliteInfo,
+      setIsTracking,
+    ]
+  );
+
+  // Stop tracking
+  const stopTracking = useCallback(async () => {
+    await safeAsync(async () => {
+      console.log("⏹️ Stopping location tracking...");
+
+      // Stop location service
+      await locationService.current.stopTracking();
+
+      // Stop background tracking
+      await BackgroundLocationService.stopBackgroundLocationTracking();
+
+      setIsTracking(false);
+      setIsPaused(false);
+      setGpsStatus("disconnected");
+      setSatelliteInfo({ total: 0, used: 0, constellations: [] });
+
+      if (currentTrackId && locations.length > 0) {
+        try {
+          await saveCurrentTrack(true);
+          console.log("✅ Final track save completed");
+        } catch (error) {
+          console.error("Error saving final track:", error);
+        }
       }
-    }
+
+      // Clear current tracking state
+      setCurrentTrackId(null);
+      setCurrentTrackName("");
+    }, "Stop tracking");
   }, [
-    requestLocationPermission,
-    setError,
-    setCurrentLocation,
-    setLocations,
-    handleError,
-    isPaused,
-    saveLocationsToBackground,
+    safeAsync,
     setIsTracking,
     setIsPaused,
+    setGpsStatus,
+    setSatelliteInfo,
+    currentTrackId,
+    locations,
+    saveCurrentTrack,
+    setCurrentTrackId,
+    setCurrentTrackName,
   ]);
-
-  // Start tracking (UI wrapper)
-  const startTracking = useCallback(async (): Promise<void> => {
-    setIsTracking(true);
-    setIsPaused(false);
-    await startLocationTracking();
-  }, [setIsTracking, setIsPaused, startLocationTracking]);
 
   // Pause tracking
   const pauseTracking = useCallback(async () => {
     await safeAsync(async () => {
       console.log("⏸️ Pausing location tracking...");
       setIsPaused(true);
+      setGpsStatus("disconnected");
+      setSatelliteInfo({ total: 0, used: 0, constellations: [] });
 
-      // Update background state
-      if (currentTrackId && currentTrackName) {
-        await saveBackgroundState(currentTrackId, currentTrackName, true, true);
-      }
-
-      // Stop location watching but keep the session
-      if (locationSubscription.current) {
-        try {
-          locationSubscription.current.remove();
-          locationSubscription.current = null;
-        } catch (error) {
-          console.error("Error removing location subscription:", error);
-        }
-      }
+      // Stop location service but keep track data
+      await locationService.current.stopTracking();
 
       // Save current progress
       if (currentTrackId && locations.length > 0) {
@@ -526,9 +445,9 @@ const App: React.FC = () => {
     }, "Pause tracking");
   }, [
     setIsPaused,
+    setGpsStatus,
+    setSatelliteInfo,
     currentTrackId,
-    currentTrackName,
-    saveBackgroundState,
     locations,
     saveCurrentTrack,
     safeAsync,
@@ -539,28 +458,23 @@ const App: React.FC = () => {
     await safeAsync(async () => {
       console.log("▶️ Resuming location tracking...");
       setIsPaused(false);
+      setGpsStatus("searching");
+      setSatelliteInfo({ total: 0, used: 0, constellations: ["GPS"] });
 
-      // Update background state
-      if (currentTrackId && currentTrackName) {
-        await saveBackgroundState(
-          currentTrackId,
-          currentTrackName,
-          true,
-          false
+      // Restart location service
+      const success = await locationService.current.startTracking();
+      if (success) {
+        console.log("✅ Tracking resumed successfully");
+      } else {
+        setError(
+          "Failed to resume GPS tracking. Please check your location settings."
         );
+        setIsPaused(true);
+        setGpsStatus("disconnected");
+        setSatelliteInfo({ total: 0, used: 0, constellations: [] });
       }
-
-      // Restart location tracking
-      await startLocationTracking();
     }, "Resume tracking");
-  }, [
-    setIsPaused,
-    currentTrackId,
-    currentTrackName,
-    saveBackgroundState,
-    startLocationTracking,
-    safeAsync,
-  ]);
+  }, [setIsPaused, setGpsStatus, setSatelliteInfo, setError, safeAsync]);
 
   // Auto-save system
   useEffect(() => {
@@ -595,99 +509,6 @@ const App: React.FC = () => {
     locations.length,
     safeAsync,
     saveCurrentTrack,
-  ]);
-
-  // Start new tracking
-  const handleStartTracking = useCallback(
-    async (trackName: string) => {
-      if (!trackName.trim()) {
-        setError("Please enter a track name");
-        return;
-      }
-
-      await safeAsync(async () => {
-        // Stop any existing tracking first
-        if (isTracking) {
-          await stopTracking();
-        }
-
-        setShowTrackNameDialog(false);
-        setCurrentTrackName(trackName.trim());
-        const newTrackId = Date.now().toString();
-        setCurrentTrackId(newTrackId);
-        setViewingTrack(null);
-        setSelectedTracks([]);
-        setError("");
-        // Only clear locations for completely new tracks
-        setLocations([]);
-        setCurrentLocation(null);
-        setIsPaused(false);
-
-        // Save background state
-        await saveBackgroundState(newTrackId, trackName.trim(), true, false);
-
-        await startTracking();
-      }, "Start tracking");
-    },
-    [
-      setError,
-      safeAsync,
-      isTracking,
-      setShowTrackNameDialog,
-      setCurrentTrackName,
-      setCurrentTrackId,
-      setViewingTrack,
-      setSelectedTracks,
-      setLocations,
-      setCurrentLocation,
-      setIsPaused,
-      saveBackgroundState,
-      startTracking,
-    ]
-  );
-
-  // Stop tracking
-  const stopTracking = useCallback(async () => {
-    await safeAsync(async () => {
-      console.log("⏹️ Stopping location tracking...");
-      setIsTracking(false);
-      setIsPaused(false);
-
-      // Clear background state
-      await clearBackgroundState();
-
-      if (locationSubscription.current) {
-        try {
-          locationSubscription.current.remove();
-          locationSubscription.current = null;
-        } catch (error) {
-          console.error("Error removing location subscription:", error);
-        }
-      }
-
-      if (currentTrackId && locations.length > 0) {
-        try {
-          await saveCurrentTrack(true);
-          console.log("✅ Final track save completed");
-        } catch (error) {
-          console.error("Error saving final track:", error);
-        }
-      }
-
-      // Clear current tracking state
-      setCurrentTrackId(null);
-      setCurrentTrackName("");
-    }, "Stop tracking");
-  }, [
-    setIsTracking,
-    setIsPaused,
-    clearBackgroundState,
-    currentTrackId,
-    locations,
-    saveCurrentTrack,
-    setCurrentTrackId,
-    setCurrentTrackName,
-    safeAsync,
   ]);
 
   // Toggle track visibility
@@ -749,10 +570,23 @@ const App: React.FC = () => {
         const tracks = await storageUtils.getAllTracks();
         setSavedTracks(tracks || []);
 
-        // Save background state
-        await saveBackgroundState(track.id, track.name, true, false);
+        // Start location service
+        const success = await locationService.current.startTracking();
+        if (success) {
+          setIsTracking(true);
+          setGpsStatus("searching");
+          setSatelliteInfo({ total: 0, used: 0, constellations: ["GPS"] });
 
-        await startTracking();
+          // Start background tracking
+          await BackgroundLocationService.startBackgroundLocationTracking(
+            track.id,
+            track.name
+          );
+        } else {
+          setError(
+            "Failed to resume GPS tracking. Please check your location settings."
+          );
+        }
       }, "Resume track");
     },
     [
@@ -769,8 +603,9 @@ const App: React.FC = () => {
       closeDrawer,
       setCurrentLocation,
       setSavedTracks,
-      saveBackgroundState,
-      startTracking,
+      setIsTracking,
+      setGpsStatus,
+      setSatelliteInfo,
     ]
   );
 
@@ -1003,21 +838,9 @@ const App: React.FC = () => {
   useEffect(() => {
     return () => {
       isUnmountedRef.current = true;
-      if (locationSubscription.current) {
-        try {
-          locationSubscription.current.remove();
-        } catch (error) {
-          console.error(
-            "Error removing location subscription on unmount:",
-            error
-          );
-        }
-      }
+      locationService.current.stopTracking();
       if (autoSaveIntervalRef.current) {
         clearInterval(autoSaveIntervalRef.current);
-      }
-      if (backgroundSyncIntervalRef.current) {
-        clearInterval(backgroundSyncIntervalRef.current);
       }
     };
   }, []);
@@ -1046,6 +869,49 @@ const App: React.FC = () => {
       trackName: track.name,
     }))
   );
+
+  // Get GPS status color
+  const getGpsStatusColor = () => {
+    switch (gpsStatus) {
+      case "connected":
+        return "#10b981";
+      case "poor":
+        return "#f59e0b";
+      case "searching":
+        return "#3b82f6";
+      case "disconnected":
+        return "#ef4444";
+      default:
+        return "#6b7280";
+    }
+  };
+
+  // Get GPS status icon
+  const getGpsStatusIcon = () => {
+    switch (gpsStatus) {
+      case "connected":
+        return "gps-fixed";
+      case "poor":
+        return "gps-not-fixed";
+      case "searching":
+        return "gps-not-fixed";
+      case "disconnected":
+        return "gps-off";
+      default:
+        return "gps-off";
+    }
+  };
+
+  // Format constellation display
+  const formatConstellations = () => {
+    if (satelliteInfo.constellations.length === 0) return "None";
+    if (satelliteInfo.constellations.length <= 2) {
+      return satelliteInfo.constellations.join(", ");
+    }
+    return `${satelliteInfo.constellations.slice(0, 2).join(", ")} +${
+      satelliteInfo.constellations.length - 2
+    }`;
+  };
 
   const theme = {
     colors: {
@@ -1097,7 +963,7 @@ const App: React.FC = () => {
                   </CrashGuard>
                 </View>
 
-                {/* Top Overlay - Header */}
+                {/* Top Overlay - Header with Enhanced GPS Status */}
                 <View
                   style={[
                     styles.mapTopOverlay,
@@ -1137,9 +1003,9 @@ const App: React.FC = () => {
                       ]}
                     >
                       <MaterialIcons
-                        name="bar-chart"
+                        name={getGpsStatusIcon()}
                         size={20}
-                        color={isDarkTheme ? "#fff" : theme.colors.primary}
+                        color={getGpsStatusColor()}
                       />
                       <Text
                         style={[
@@ -1154,7 +1020,7 @@ const App: React.FC = () => {
                               selectedTracks.length > 1 ? "s" : ""
                             } Selected`
                           : isTracking
-                          ? currentTrackName
+                          ? `${currentTrackName} • ${satelliteInfo.used}/${satelliteInfo.total} SAT`
                           : "GPS Tracker"}
                       </Text>
                     </TouchableOpacity>
@@ -1194,7 +1060,7 @@ const App: React.FC = () => {
                   </View>
                 </View>
 
-                {/* Bottom Overlay - Statistics */}
+                {/* Bottom Overlay - Enhanced Statistics with Dynamic GPS Info */}
                 <View
                   style={[
                     styles.mapBottomOverlay,
@@ -1236,33 +1102,31 @@ const App: React.FC = () => {
                     </View>
 
                     <View style={styles.statItem}>
-                      <Text
-                        style={[
-                          styles.statValue,
-                          {
-                            color: isTracking
-                              ? isPaused
-                                ? "#f59e0b"
-                                : theme.colors.accent
-                              : isDarkTheme
-                              ? "#fff"
-                              : theme.colors.text,
-                          },
-                        ]}
-                      >
-                        {isTracking
-                          ? isPaused
-                            ? "Paused"
-                            : "Recording"
-                          : "Stopped"}
-                      </Text>
+                      <View style={styles.gpsStatusContainer}>
+                        <MaterialIcons
+                          name={getGpsStatusIcon()}
+                          size={16}
+                          color={getGpsStatusColor()}
+                        />
+                        <Text
+                          style={[
+                            styles.statValue,
+                            {
+                              color: getGpsStatusColor(),
+                              fontSize: 14,
+                            },
+                          ]}
+                        >
+                          {satelliteInfo.used}/{satelliteInfo.total}
+                        </Text>
+                      </View>
                       <Text
                         style={[
                           styles.statLabel,
                           { color: isDarkTheme ? "#ccc" : "#64748b" },
                         ]}
                       >
-                        STATUS
+                        SATELLITES
                       </Text>
                     </View>
 
@@ -1323,9 +1187,9 @@ const App: React.FC = () => {
                           { color: isDarkTheme ? "#fff" : theme.colors.text },
                         ]}
                       >
-                        {currentLocation?.heading
-                          ? `${Math.round(currentLocation.heading)}°`
-                          : "0°"}
+                        {currentLocation?.accuracy
+                          ? `±${Math.round(currentLocation.accuracy)}m`
+                          : "±--m"}
                       </Text>
                       <Text
                         style={[
@@ -1333,12 +1197,12 @@ const App: React.FC = () => {
                           { color: isDarkTheme ? "#ccc" : "#94a3b8" },
                         ]}
                       >
-                        BEARING
+                        ACCURACY
                       </Text>
                     </View>
                   </View>
 
-                  {/* Additional Stats Row */}
+                  {/* Additional Stats Row with Constellation Info */}
                   <View style={styles.additionalStatsRow}>
                     <View style={styles.additionalStatItem}>
                       <Text
@@ -1387,7 +1251,7 @@ const App: React.FC = () => {
                           { color: isDarkTheme ? "#fff" : theme.colors.text },
                         ]}
                       >
-                        {currentLocation?.latitude?.toFixed(4) || "0.0000"}°N
+                        {formatConstellations()}
                       </Text>
                       <Text
                         style={[
@@ -1395,7 +1259,7 @@ const App: React.FC = () => {
                           { color: isDarkTheme ? "#888" : "#94a3b8" },
                         ]}
                       >
-                        LATITUDE
+                        GNSS
                       </Text>
                     </View>
 
@@ -1403,12 +1267,10 @@ const App: React.FC = () => {
                       <Text
                         style={[
                           styles.additionalStatValue,
-                          { color: isDarkTheme ? "#fff" : theme.colors.text },
+                          { color: getGpsStatusColor() },
                         ]}
                       >
-                        {currentLocation?.accuracy
-                          ? `${Math.round(currentLocation.accuracy)} m`
-                          : "0 m"}
+                        {gpsStatus.toUpperCase()}
                       </Text>
                       <Text
                         style={[
@@ -1416,7 +1278,7 @@ const App: React.FC = () => {
                           { color: isDarkTheme ? "#888" : "#94a3b8" },
                         ]}
                       >
-                        ACCURACY
+                        STATUS
                       </Text>
                     </View>
                   </View>
@@ -1641,7 +1503,7 @@ const App: React.FC = () => {
                     </TouchableOpacity>
                   </View>
 
-                  {/* Current Track Status */}
+                  {/* Current Track Status with Enhanced GPS Info */}
                   {isTracking && (
                     <View style={styles.currentTrackStatus}>
                       <View style={styles.trackStatusRow}>
@@ -1664,6 +1526,21 @@ const App: React.FC = () => {
                           {currentTrackName} •{" "}
                           {isPaused ? "Paused" : "Recording"}
                         </Text>
+                        <View style={styles.gpsStatusBadge}>
+                          <MaterialIcons
+                            name={getGpsStatusIcon()}
+                            size={12}
+                            color={getGpsStatusColor()}
+                          />
+                          <Text
+                            style={[
+                              styles.gpsStatusText,
+                              { color: getGpsStatusColor() },
+                            ]}
+                          >
+                            {satelliteInfo.used}/{satelliteInfo.total}
+                          </Text>
+                        </View>
                       </View>
                       <Text
                         style={[
@@ -1676,14 +1553,34 @@ const App: React.FC = () => {
                           ? `${(totalDistance / 1000).toFixed(2)} km`
                           : `${Math.round(totalDistance)} m`}
                       </Text>
-                      {!isPaused && (
+                      {!isPaused && gpsStatus === "connected" && (
                         <Text
                           style={[
                             styles.trackStatusStats,
                             { color: theme.colors.accent, fontSize: 10 },
                           ]}
                         >
-                          Background tracking enabled
+                          GPS locked • {formatConstellations()} active
+                        </Text>
+                      )}
+                      {gpsStatus === "searching" && (
+                        <Text
+                          style={[
+                            styles.trackStatusStats,
+                            { color: "#f59e0b", fontSize: 10 },
+                          ]}
+                        >
+                          Acquiring satellites... {satelliteInfo.used} found
+                        </Text>
+                      )}
+                      {gpsStatus === "poor" && (
+                        <Text
+                          style={[
+                            styles.trackStatusStats,
+                            { color: "#f59e0b", fontSize: 10 },
+                          ]}
+                        >
+                          Poor GPS signal • {satelliteInfo.used} satellites
                         </Text>
                       )}
                     </View>
@@ -2057,7 +1954,7 @@ const App: React.FC = () => {
                           { color: theme.colors.text },
                         ]}
                       >
-                        GPS Tracker
+                        GPS Tracker Pro
                       </Text>
                     </View>
 
@@ -2065,10 +1962,57 @@ const App: React.FC = () => {
                       <Text
                         style={[styles.aboutText, { color: theme.colors.text }]}
                       >
-                        Professional GPS tracking application with real-time
-                        location monitoring, track management, and export
-                        capabilities.
+                        Professional GPS tracking application with dynamic
+                        satellite monitoring, multi-constellation GNSS support,
+                        and intelligent GPS management.
                       </Text>
+
+                      <View style={styles.aboutSection}>
+                        <Text
+                          style={[
+                            styles.aboutSectionTitle,
+                            { color: theme.colors.primary },
+                          ]}
+                        >
+                          Advanced GPS Features
+                        </Text>
+                        <Text
+                          style={[
+                            styles.aboutTechText,
+                            { color: isDarkTheme ? "#ccc" : "#64748b" },
+                          ]}
+                        >
+                          • Dynamic satellite count calculation{"\n"}•
+                          Multi-constellation GNSS support{"\n"}• GPS warmup and
+                          recovery systems{"\n"}• Real-time accuracy monitoring
+                          {"\n"}• Intelligent fallback mechanisms{"\n"}•
+                          Background location tracking{"\n"}• Comprehensive
+                          error handling
+                        </Text>
+                      </View>
+
+                      <View style={styles.aboutSection}>
+                        <Text
+                          style={[
+                            styles.aboutSectionTitle,
+                            { color: theme.colors.primary },
+                          ]}
+                        >
+                          Supported Constellations
+                        </Text>
+                        <Text
+                          style={[
+                            styles.aboutTechText,
+                            { color: isDarkTheme ? "#ccc" : "#64748b" },
+                          ]}
+                        >
+                          • GPS (US) - 31 satellites{"\n"}• GLONASS (Russia) -
+                          24 satellites{"\n"}• Galileo (EU) - 28 satellites
+                          {"\n"}• BeiDou (China) - 35 satellites{"\n"}• QZSS
+                          (Japan) - 7 satellites{"\n"}• IRNSS (India) - 7
+                          satellites
+                        </Text>
+                      </View>
 
                       <View style={styles.aboutSection}>
                         <Text
@@ -2086,49 +2030,6 @@ const App: React.FC = () => {
                           ]}
                         >
                           Kuldeep Sahoo
-                        </Text>
-                      </View>
-
-                      <View style={styles.aboutSection}>
-                        <Text
-                          style={[
-                            styles.aboutSectionTitle,
-                            { color: theme.colors.primary },
-                          ]}
-                        >
-                          Tech Stack
-                        </Text>
-                        <Text
-                          style={[
-                            styles.aboutTechText,
-                            { color: isDarkTheme ? "#ccc" : "#64748b" },
-                          ]}
-                        >
-                          • React Native & Expo{"\n"}• TypeScript{"\n"}• Leaflet
-                          Maps{"\n"}• React Native Paper{"\n"}• Expo Location
-                          Services{"\n"}• AsyncStorage{"\n"}• KML/GPX Export
-                        </Text>
-                      </View>
-
-                      <View style={styles.aboutSection}>
-                        <Text
-                          style={[
-                            styles.aboutSectionTitle,
-                            { color: theme.colors.primary },
-                          ]}
-                        >
-                          Features
-                        </Text>
-                        <Text
-                          style={[
-                            styles.aboutTechText,
-                            { color: isDarkTheme ? "#ccc" : "#64748b" },
-                          ]}
-                        >
-                          • Real-time GPS tracking{"\n"}• Multiple map layers
-                          {"\n"}• Track import/export{"\n"}• Multi-track viewing
-                          {"\n"}• Dark/Light themes{"\n"}• Background tracking
-                          {"\n"}• Pause/Resume functionality
                         </Text>
                       </View>
                     </View>
@@ -2268,6 +2169,12 @@ const styles = StyleSheet.create({
     marginTop: 1,
     fontWeight: "400",
   },
+  gpsStatusContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    marginBottom: 4,
+  },
   additionalStatsRow: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -2394,6 +2301,19 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
     flex: 1,
+  },
+  gpsStatusBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
+  },
+  gpsStatusText: {
+    fontSize: 8,
+    fontWeight: "600",
   },
   trackStatusStats: {
     fontSize: 10,
