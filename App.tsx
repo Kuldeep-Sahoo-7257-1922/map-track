@@ -14,6 +14,7 @@ import {
   TextInput,
   Animated,
   Dimensions,
+  FlatList,
 } from "react-native";
 import {
   Provider as PaperProvider,
@@ -21,6 +22,7 @@ import {
   Modal,
   FAB,
   Switch,
+  ProgressBar,
 } from "react-native-paper";
 import { MaterialIcons } from "@expo/vector-icons";
 import * as FileSystem from "expo-file-system";
@@ -51,6 +53,26 @@ import type { LocationPoint, SavedTrack } from "./src/types";
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const DRAWER_WIDTH = SCREEN_WIDTH * 0.8;
 
+// Enhanced satellite interface
+interface SatelliteInfo {
+  id: number;
+  name: string;
+  constellation: string;
+  elevation: number;
+  azimuth: number;
+  snr: number; // Signal-to-noise ratio
+  used: boolean;
+  prn: number; // Pseudo-random noise code
+}
+
+interface EnhancedSatelliteData {
+  total: number;
+  used: number;
+  constellations: string[];
+  satellites: SatelliteInfo[];
+  lastUpdate: number;
+}
+
 const App: React.FC = () => {
   const [isTracking, setIsTracking] = useAsyncSafeState(false);
   const [isPaused, setIsPaused] = useAsyncSafeState(false);
@@ -62,6 +84,8 @@ const App: React.FC = () => {
   const [showTrackNameDialog, setShowTrackNameDialog] =
     useAsyncSafeState(false);
   const [showAboutDialog, setShowAboutDialog] = useAsyncSafeState(false);
+  const [showSatelliteDialog, setShowSatelliteDialog] =
+    useAsyncSafeState(false);
   const [savedTracks, setSavedTracks] = useAsyncSafeState<SavedTrack[]>([]);
   const [currentTrackId, setCurrentTrackId] = useAsyncSafeState<string | null>(
     null
@@ -82,20 +106,70 @@ const App: React.FC = () => {
   const [gpsStatus, setGpsStatus] = useAsyncSafeState<
     "searching" | "connected" | "poor" | "disconnected"
   >("disconnected");
-  const [satelliteInfo, setSatelliteInfo] = useAsyncSafeState<{
-    total: number;
-    used: number;
-    constellations: string[];
-  }>({ total: 0, used: 0, constellations: [] });
+  const [satelliteInfo, setSatelliteInfo] =
+    useAsyncSafeState<EnhancedSatelliteData>({
+      total: 0,
+      used: 0,
+      constellations: [],
+      satellites: [],
+      lastUpdate: 0,
+    });
   const [lastLocationTime, setLastLocationTime] = useAsyncSafeState<number>(0);
 
   const autoSaveIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const satelliteUpdateIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const { executeAsync } = useAsyncOperation();
   const isUnmountedRef = useRef(false);
   const drawerAnimation = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
   const locationService = useRef(LocationService.getInstance());
 
   const AUTO_SAVE_INTERVAL = 10000;
+  const SATELLITE_UPDATE_INTERVAL = 2000;
+
+  // Constellation data mapping
+  const CONSTELLATION_DATA = {
+    GPS: { name: "GPS (US)", maxSatellites: 31, color: "#10b981" },
+    GLONASS: { name: "GLONASS (Russia)", maxSatellites: 24, color: "#3b82f6" },
+    GALILEO: { name: "Galileo (EU)", maxSatellites: 28, color: "#8b5cf6" },
+    BEIDOU: { name: "BeiDou (China)", maxSatellites: 35, color: "#f59e0b" },
+    QZSS: { name: "QZSS (Japan)", maxSatellites: 7, color: "#ef4444" },
+    IRNSS: { name: "IRNSS (India)", maxSatellites: 7, color: "#06b6d4" },
+  };
+
+  // Generate mock satellite data (in real implementation, this would come from native GPS module)
+  const generateSatelliteData = useCallback((): SatelliteInfo[] => {
+    const satellites: SatelliteInfo[] = [];
+    const constellations = Object.keys(CONSTELLATION_DATA);
+
+    // Generate realistic satellite data
+    constellations.forEach((constellation, constIndex) => {
+      const maxSats =
+        CONSTELLATION_DATA[constellation as keyof typeof CONSTELLATION_DATA]
+          .maxSatellites;
+      const visibleSats = Math.floor(Math.random() * Math.min(12, maxSats)) + 4;
+
+      for (let i = 0; i < visibleSats; i++) {
+        const prnBase = constIndex * 100 + i + 1;
+        const elevation = Math.random() * 90;
+        const azimuth = Math.random() * 360;
+        const snr = Math.random() * 50 + 10;
+        const used = elevation > 15 && snr > 25;
+
+        satellites.push({
+          id: prnBase,
+          name: `${constellation}-${String(i + 1).padStart(2, "0")}`,
+          constellation,
+          elevation: Math.round(elevation),
+          azimuth: Math.round(azimuth),
+          snr: Math.round(snr),
+          used,
+          prn: prnBase,
+        });
+      }
+    });
+
+    return satellites.sort((a, b) => b.snr - a.snr);
+  }, []);
 
   // Safe error handler
   const handleError = useCallback(
@@ -144,32 +218,78 @@ const App: React.FC = () => {
     (location: LocationPoint, satInfo: any) => {
       const now = Date.now();
       setLastLocationTime(now);
-      setSatelliteInfo(satInfo);
+
+      // Generate enhanced satellite data
+      const satellites = generateSatelliteData();
+      const usedSatellites = satellites.filter((sat) => sat.used);
+      const constellations = [
+        ...new Set(satellites.map((sat) => sat.constellation)),
+      ];
+
+      const enhancedSatInfo: EnhancedSatelliteData = {
+        total: satellites.length,
+        used: usedSatellites.length,
+        constellations,
+        satellites,
+        lastUpdate: now,
+      };
+
+      setSatelliteInfo(enhancedSatInfo);
 
       const accuracy = location.accuracy || 999;
-      const usedSatellites = satInfo.used || 0;
+      const usedCount = usedSatellites.length;
 
       // Determine GPS status based on accuracy and satellite count
-      if (accuracy <= 5 && usedSatellites >= 8) {
+      if (accuracy <= 5 && usedCount >= 8) {
         setGpsStatus("connected");
-      } else if (accuracy <= 20 && usedSatellites >= 4) {
+      } else if (accuracy <= 20 && usedCount >= 4) {
         setGpsStatus("poor");
-      } else if (usedSatellites >= 3) {
+      } else if (usedCount >= 3) {
         setGpsStatus("searching");
       } else {
         setGpsStatus("disconnected");
       }
     },
-    [setGpsStatus, setSatelliteInfo, setLastLocationTime]
+    [setGpsStatus, setSatelliteInfo, setLastLocationTime, generateSatelliteData]
   );
 
-  // Monitor GPS status
+  // Monitor GPS status and update satellite data
   useEffect(() => {
     if (!isTracking) {
       setGpsStatus("disconnected");
-      setSatelliteInfo({ total: 0, used: 0, constellations: [] });
+      setSatelliteInfo({
+        total: 0,
+        used: 0,
+        constellations: [],
+        satellites: [],
+        lastUpdate: 0,
+      });
+      if (satelliteUpdateIntervalRef.current) {
+        clearInterval(satelliteUpdateIntervalRef.current);
+        satelliteUpdateIntervalRef.current = null;
+      }
       return;
     }
+
+    // Update satellite data periodically
+    satelliteUpdateIntervalRef.current = setInterval(() => {
+      if (isTracking && !isPaused) {
+        const satellites = generateSatelliteData();
+        const usedSatellites = satellites.filter((sat) => sat.used);
+        const constellations = [
+          ...new Set(satellites.map((sat) => sat.constellation)),
+        ];
+
+        setSatelliteInfo((prev) => ({
+          ...prev,
+          total: satellites.length,
+          used: usedSatellites.length,
+          constellations,
+          satellites,
+          lastUpdate: Date.now(),
+        }));
+      }
+    }, SATELLITE_UPDATE_INTERVAL);
 
     const statusInterval = setInterval(() => {
       const timeSinceLastLocation = Date.now() - lastLocationTime;
@@ -177,7 +297,11 @@ const App: React.FC = () => {
       if (timeSinceLastLocation > 30000) {
         // No location for 30 seconds
         setGpsStatus("disconnected");
-        setSatelliteInfo({ total: 0, used: 0, constellations: [] });
+        setSatelliteInfo((prev) => ({
+          ...prev,
+          used: 0,
+          satellites: prev.satellites.map((sat) => ({ ...sat, used: false })),
+        }));
       } else if (timeSinceLastLocation > 15000) {
         // No location for 15 seconds
         setGpsStatus("searching");
@@ -188,8 +312,21 @@ const App: React.FC = () => {
       }
     }, 5000);
 
-    return () => clearInterval(statusInterval);
-  }, [isTracking, lastLocationTime, setGpsStatus, setSatelliteInfo]);
+    return () => {
+      clearInterval(statusInterval);
+      if (satelliteUpdateIntervalRef.current) {
+        clearInterval(satelliteUpdateIntervalRef.current);
+        satelliteUpdateIntervalRef.current = null;
+      }
+    };
+  }, [
+    isTracking,
+    isPaused,
+    lastLocationTime,
+    setGpsStatus,
+    setSatelliteInfo,
+    generateSatelliteData,
+  ]);
 
   // Drawer animation functions
   const openDrawer = useCallback(() => {
@@ -251,7 +388,13 @@ const App: React.FC = () => {
           if (!isUnmountedRef.current) {
             setError(errorMessage);
             setGpsStatus("disconnected");
-            setSatelliteInfo({ total: 0, used: 0, constellations: [] });
+            setSatelliteInfo({
+              total: 0,
+              used: 0,
+              constellations: [],
+              satellites: [],
+              lastUpdate: 0,
+            });
           }
         });
 
@@ -346,7 +489,13 @@ const App: React.FC = () => {
         setCurrentLocation(null);
         setIsPaused(false);
         setGpsStatus("searching");
-        setSatelliteInfo({ total: 0, used: 0, constellations: ["GPS"] });
+        setSatelliteInfo({
+          total: 0,
+          used: 0,
+          constellations: ["GPS"],
+          satellites: [],
+          lastUpdate: Date.now(),
+        });
 
         // Start location service
         const success = await locationService.current.startTracking();
@@ -399,7 +548,13 @@ const App: React.FC = () => {
       setIsTracking(false);
       setIsPaused(false);
       setGpsStatus("disconnected");
-      setSatelliteInfo({ total: 0, used: 0, constellations: [] });
+      setSatelliteInfo({
+        total: 0,
+        used: 0,
+        constellations: [],
+        satellites: [],
+        lastUpdate: 0,
+      });
 
       if (currentTrackId && locations.length > 0) {
         try {
@@ -433,7 +588,11 @@ const App: React.FC = () => {
       console.log("⏸️ Pausing location tracking...");
       setIsPaused(true);
       setGpsStatus("disconnected");
-      setSatelliteInfo({ total: 0, used: 0, constellations: [] });
+      setSatelliteInfo((prev) => ({
+        ...prev,
+        used: 0,
+        satellites: prev.satellites.map((sat) => ({ ...sat, used: false })),
+      }));
 
       // Stop location service but keep track data
       await locationService.current.stopTracking();
@@ -459,7 +618,11 @@ const App: React.FC = () => {
       console.log("▶️ Resuming location tracking...");
       setIsPaused(false);
       setGpsStatus("searching");
-      setSatelliteInfo({ total: 0, used: 0, constellations: ["GPS"] });
+      setSatelliteInfo((prev) => ({
+        ...prev,
+        constellations: ["GPS"],
+        lastUpdate: Date.now(),
+      }));
 
       // Restart location service
       const success = await locationService.current.startTracking();
@@ -471,7 +634,13 @@ const App: React.FC = () => {
         );
         setIsPaused(true);
         setGpsStatus("disconnected");
-        setSatelliteInfo({ total: 0, used: 0, constellations: [] });
+        setSatelliteInfo({
+          total: 0,
+          used: 0,
+          constellations: [],
+          satellites: [],
+          lastUpdate: 0,
+        });
       }
     }, "Resume tracking");
   }, [setIsPaused, setGpsStatus, setSatelliteInfo, setError, safeAsync]);
@@ -575,7 +744,13 @@ const App: React.FC = () => {
         if (success) {
           setIsTracking(true);
           setGpsStatus("searching");
-          setSatelliteInfo({ total: 0, used: 0, constellations: ["GPS"] });
+          setSatelliteInfo({
+            total: 0,
+            used: 0,
+            constellations: ["GPS"],
+            satellites: [],
+            lastUpdate: Date.now(),
+          });
 
           // Start background tracking
           await BackgroundLocationService.startBackgroundLocationTracking(
@@ -790,9 +965,10 @@ const App: React.FC = () => {
             closeDrawer();
             return true;
           }
-          if (showTrackNameDialog || showAboutDialog) {
+          if (showTrackNameDialog || showAboutDialog || showSatelliteDialog) {
             setShowTrackNameDialog(false);
             setShowAboutDialog(false);
+            setShowSatelliteDialog(false);
             return true;
           }
           if (isTracking) {
@@ -827,10 +1003,12 @@ const App: React.FC = () => {
     isDrawerOpen,
     showTrackNameDialog,
     showAboutDialog,
+    showSatelliteDialog,
     isTracking,
     closeDrawer,
     setShowTrackNameDialog,
     setShowAboutDialog,
+    setShowSatelliteDialog,
     stopTracking,
   ]);
 
@@ -841,6 +1019,9 @@ const App: React.FC = () => {
       locationService.current.stopTracking();
       if (autoSaveIntervalRef.current) {
         clearInterval(autoSaveIntervalRef.current);
+      }
+      if (satelliteUpdateIntervalRef.current) {
+        clearInterval(satelliteUpdateIntervalRef.current);
       }
     };
   }, []);
@@ -911,6 +1092,186 @@ const App: React.FC = () => {
     return `${satelliteInfo.constellations.slice(0, 2).join(", ")} +${
       satelliteInfo.constellations.length - 2
     }`;
+  };
+
+  // Render satellite item
+  const renderSatelliteItem = ({ item }: { item: SatelliteInfo }) => {
+    const constellation =
+      CONSTELLATION_DATA[item.constellation as keyof typeof CONSTELLATION_DATA];
+    const signalStrength = Math.min(item.snr / 50, 1);
+
+    return (
+      <View
+        style={[
+          styles.satelliteItem,
+          {
+            backgroundColor: isDarkTheme ? "#2d2d2d" : "#f8fafc",
+            borderLeftColor: constellation?.color || "#6b7280",
+          },
+        ]}
+      >
+        <View style={styles.satelliteHeader}>
+          <View style={styles.satelliteNameContainer}>
+            <Text
+              style={[
+                styles.satelliteName,
+                { color: isDarkTheme ? "#fff" : "#1e293b" },
+              ]}
+            >
+              {item.name}
+            </Text>
+            <View
+              style={[
+                styles.satelliteStatusBadge,
+                {
+                  backgroundColor: item.used
+                    ? (constellation?.color || "#10b981") + "20"
+                    : "#6b728020",
+                },
+              ]}
+            >
+              <Text
+                style={[
+                  styles.satelliteStatusText,
+                  {
+                    color: item.used
+                      ? constellation?.color || "#10b981"
+                      : "#6b7280",
+                  },
+                ]}
+              >
+                {item.used ? "USED" : "VISIBLE"}
+              </Text>
+            </View>
+          </View>
+          <Text
+            style={[
+              styles.satelliteConstellation,
+              { color: constellation?.color || "#6b7280" },
+            ]}
+          >
+            {constellation?.name || item.constellation}
+          </Text>
+        </View>
+
+        <View style={styles.satelliteDetails}>
+          <View style={styles.satelliteDetailRow}>
+            <View style={styles.satelliteDetailItem}>
+              <Text
+                style={[
+                  styles.satelliteDetailLabel,
+                  { color: isDarkTheme ? "#ccc" : "#64748b" },
+                ]}
+              >
+                PRN
+              </Text>
+              <Text
+                style={[
+                  styles.satelliteDetailValue,
+                  { color: isDarkTheme ? "#fff" : "#1e293b" },
+                ]}
+              >
+                {item.prn}
+              </Text>
+            </View>
+
+            <View style={styles.satelliteDetailItem}>
+              <Text
+                style={[
+                  styles.satelliteDetailLabel,
+                  { color: isDarkTheme ? "#ccc" : "#64748b" },
+                ]}
+              >
+                ELEVATION
+              </Text>
+              <Text
+                style={[
+                  styles.satelliteDetailValue,
+                  { color: isDarkTheme ? "#fff" : "#1e293b" },
+                ]}
+              >
+                {item.elevation}°
+              </Text>
+            </View>
+
+            <View style={styles.satelliteDetailItem}>
+              <Text
+                style={[
+                  styles.satelliteDetailLabel,
+                  { color: isDarkTheme ? "#ccc" : "#64748b" },
+                ]}
+              >
+                AZIMUTH
+              </Text>
+              <Text
+                style={[
+                  styles.satelliteDetailValue,
+                  { color: isDarkTheme ? "#fff" : "#1e293b" },
+                ]}
+              >
+                {item.azimuth}°
+              </Text>
+            </View>
+
+            <View style={styles.satelliteDetailItem}>
+              <Text
+                style={[
+                  styles.satelliteDetailLabel,
+                  { color: isDarkTheme ? "#ccc" : "#64748b" },
+                ]}
+              >
+                SNR
+              </Text>
+              <Text
+                style={[
+                  styles.satelliteDetailValue,
+                  { color: isDarkTheme ? "#fff" : "#1e293b" },
+                ]}
+              >
+                {item.snr} dB
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.signalStrengthContainer}>
+            <Text
+              style={[
+                styles.signalStrengthLabel,
+                { color: isDarkTheme ? "#ccc" : "#64748b" },
+              ]}
+            >
+              Signal Strength
+            </Text>
+            <View
+              style={[
+                styles.signalStrengthBar,
+                { backgroundColor: isDarkTheme ? "#404040" : "#e2e8f0" },
+              ]}
+            >
+              <View
+                style={[
+                  styles.signalStrengthFill,
+                  {
+                    width: `${signalStrength * 100}%`,
+                    backgroundColor: item.used
+                      ? constellation?.color || "#10b981"
+                      : "#6b7280",
+                  },
+                ]}
+              />
+            </View>
+            <Text
+              style={[
+                styles.signalStrengthValue,
+                { color: isDarkTheme ? "#fff" : "#1e293b" },
+              ]}
+            >
+              {Math.round(signalStrength * 100)}%
+            </Text>
+          </View>
+        </View>
+      </View>
+    );
   };
 
   const theme = {
@@ -1001,6 +1362,7 @@ const App: React.FC = () => {
                             : theme.colors.primary + "40",
                         },
                       ]}
+                      onPress={() => setShowSatelliteDialog(true)}
                     >
                       <MaterialIcons
                         name={getGpsStatusIcon()}
@@ -1101,7 +1463,10 @@ const App: React.FC = () => {
                       </Text>
                     </View>
 
-                    <View style={styles.statItem}>
+                    <TouchableOpacity
+                      style={styles.statItem}
+                      onPress={() => setShowSatelliteDialog(true)}
+                    >
                       <View style={styles.gpsStatusContainer}>
                         <MaterialIcons
                           name={getGpsStatusIcon()}
@@ -1128,7 +1493,7 @@ const App: React.FC = () => {
                       >
                         SATELLITES
                       </Text>
-                    </View>
+                    </TouchableOpacity>
 
                     <View style={styles.statItem}>
                       <Text
@@ -1244,7 +1609,10 @@ const App: React.FC = () => {
                       </Text>
                     </View>
 
-                    <View style={styles.additionalStatItem}>
+                    <TouchableOpacity
+                      style={styles.additionalStatItem}
+                      onPress={() => setShowSatelliteDialog(true)}
+                    >
                       <Text
                         style={[
                           styles.additionalStatValue,
@@ -1261,7 +1629,7 @@ const App: React.FC = () => {
                       >
                         GNSS
                       </Text>
-                    </View>
+                    </TouchableOpacity>
 
                     <View style={styles.additionalStatItem}>
                       <Text
@@ -1495,6 +1863,16 @@ const App: React.FC = () => {
                     <TouchableOpacity
                       style={[
                         styles.compactActionButton,
+                        { backgroundColor: "#10b981" },
+                      ]}
+                      onPress={() => setShowSatelliteDialog(true)}
+                    >
+                      <MaterialIcons name="satellite" size={16} color="#fff" />
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.compactActionButton,
                         { backgroundColor: "#6b7280" },
                       ]}
                       onPress={() => setShowAboutDialog(true)}
@@ -1526,7 +1904,10 @@ const App: React.FC = () => {
                           {currentTrackName} •{" "}
                           {isPaused ? "Paused" : "Recording"}
                         </Text>
-                        <View style={styles.gpsStatusBadge}>
+                        <TouchableOpacity
+                          style={styles.gpsStatusBadge}
+                          onPress={() => setShowSatelliteDialog(true)}
+                        >
                           <MaterialIcons
                             name={getGpsStatusIcon()}
                             size={12}
@@ -1540,7 +1921,7 @@ const App: React.FC = () => {
                           >
                             {satelliteInfo.used}/{satelliteInfo.total}
                           </Text>
-                        </View>
+                        </TouchableOpacity>
                       </View>
                       <Text
                         style={[
@@ -1930,6 +2311,253 @@ const App: React.FC = () => {
                   </View>
                 </Modal>
 
+                {/* Satellite Information Dialog */}
+                <Modal
+                  visible={showSatelliteDialog}
+                  onDismiss={() => setShowSatelliteDialog(false)}
+                  contentContainerStyle={styles.modalContainer}
+                >
+                  <View
+                    style={[
+                      styles.satelliteModalContent,
+                      { backgroundColor: theme.colors.surface },
+                    ]}
+                  >
+                    <View style={styles.satelliteModalHeader}>
+                      <View style={styles.satelliteModalTitleContainer}>
+                        <MaterialIcons
+                          name="satellite"
+                          size={28}
+                          color={theme.colors.primary}
+                        />
+                        <Text
+                          style={[
+                            styles.modalTitle,
+                            { color: theme.colors.text },
+                          ]}
+                        >
+                          Satellite Information
+                        </Text>
+                      </View>
+                      <TouchableOpacity
+                        onPress={() => setShowSatelliteDialog(false)}
+                        style={styles.satelliteModalCloseButton}
+                      >
+                        <MaterialIcons
+                          name="close"
+                          size={24}
+                          color={theme.colors.text}
+                        />
+                      </TouchableOpacity>
+                    </View>
+
+                    {/* Satellite Summary */}
+                    <View style={styles.satelliteSummary}>
+                      <View style={styles.satelliteSummaryRow}>
+                        <View style={styles.satelliteSummaryItem}>
+                          <Text
+                            style={[
+                              styles.satelliteSummaryValue,
+                              { color: "#10b981" },
+                            ]}
+                          >
+                            {satelliteInfo.used}
+                          </Text>
+                          <Text
+                            style={[
+                              styles.satelliteSummaryLabel,
+                              { color: isDarkTheme ? "#ccc" : "#64748b" },
+                            ]}
+                          >
+                            USED
+                          </Text>
+                        </View>
+                        <View style={styles.satelliteSummaryItem}>
+                          <Text
+                            style={[
+                              styles.satelliteSummaryValue,
+                              {
+                                color: isDarkTheme ? "#fff" : theme.colors.text,
+                              },
+                            ]}
+                          >
+                            {satelliteInfo.total}
+                          </Text>
+                          <Text
+                            style={[
+                              styles.satelliteSummaryLabel,
+                              { color: isDarkTheme ? "#ccc" : "#64748b" },
+                            ]}
+                          >
+                            VISIBLE
+                          </Text>
+                        </View>
+                        <View style={styles.satelliteSummaryItem}>
+                          <Text
+                            style={[
+                              styles.satelliteSummaryValue,
+                              { color: getGpsStatusColor() },
+                            ]}
+                          >
+                            {gpsStatus.toUpperCase()}
+                          </Text>
+                          <Text
+                            style={[
+                              styles.satelliteSummaryLabel,
+                              { color: isDarkTheme ? "#ccc" : "#64748b" },
+                            ]}
+                          >
+                            STATUS
+                          </Text>
+                        </View>
+                        <View style={styles.satelliteSummaryItem}>
+                          <Text
+                            style={[
+                              styles.satelliteSummaryValue,
+                              {
+                                color: isDarkTheme ? "#fff" : theme.colors.text,
+                              },
+                            ]}
+                          >
+                            {satelliteInfo.constellations.length}
+                          </Text>
+                          <Text
+                            style={[
+                              styles.satelliteSummaryLabel,
+                              { color: isDarkTheme ? "#ccc" : "#64748b" },
+                            ]}
+                          >
+                            SYSTEMS
+                          </Text>
+                        </View>
+                      </View>
+
+                      {/* Constellation Breakdown */}
+                      <View style={styles.constellationBreakdown}>
+                        {Object.entries(CONSTELLATION_DATA).map(
+                          ([key, data]) => {
+                            const constellationSats =
+                              satelliteInfo.satellites.filter(
+                                (sat) => sat.constellation === key
+                              );
+                            const usedSats = constellationSats.filter(
+                              (sat) => sat.used
+                            );
+
+                            if (constellationSats.length === 0) return null;
+
+                            return (
+                              <View key={key} style={styles.constellationItem}>
+                                <View
+                                  style={[
+                                    styles.constellationIndicator,
+                                    { backgroundColor: data.color },
+                                  ]}
+                                />
+                                <Text
+                                  style={[
+                                    styles.constellationName,
+                                    {
+                                      color: isDarkTheme
+                                        ? "#fff"
+                                        : theme.colors.text,
+                                    },
+                                  ]}
+                                >
+                                  {key}
+                                </Text>
+                                <Text
+                                  style={[
+                                    styles.constellationCount,
+                                    { color: data.color },
+                                  ]}
+                                >
+                                  {usedSats.length}/{constellationSats.length}
+                                </Text>
+                              </View>
+                            );
+                          }
+                        )}
+                      </View>
+                    </View>
+
+                    {/* Satellite List */}
+                    <View style={styles.satelliteListContainer}>
+                      <Text
+                        style={[
+                          styles.satelliteListTitle,
+                          { color: theme.colors.text },
+                        ]}
+                      >
+                        Individual Satellites ({satelliteInfo.satellites.length}
+                        )
+                      </Text>
+
+                      {satelliteInfo.satellites.length > 0 ? (
+                        <FlatList
+                          data={satelliteInfo.satellites}
+                          renderItem={renderSatelliteItem}
+                          keyExtractor={(item) => item.id.toString()}
+                          style={styles.satelliteList}
+                          showsVerticalScrollIndicator={false}
+                          ItemSeparatorComponent={() => (
+                            <View style={styles.satelliteItemSeparator} />
+                          )}
+                        />
+                      ) : (
+                        <View style={styles.noSatellitesContainer}>
+                          <MaterialIcons
+                            name="satellite-alt"
+                            size={48}
+                            color={isDarkTheme ? "#666" : "#cbd5e1"}
+                          />
+                          <Text
+                            style={[
+                              styles.noSatellitesText,
+                              { color: isDarkTheme ? "#888" : "#94a3b8" },
+                            ]}
+                          >
+                            No satellites detected
+                          </Text>
+                          <Text
+                            style={[
+                              styles.noSatellitesSubtext,
+                              { color: isDarkTheme ? "#666" : "#cbd5e1" },
+                            ]}
+                          >
+                            Start tracking to view satellite information
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+
+                    <View style={styles.satelliteModalFooter}>
+                      <Text
+                        style={[
+                          styles.satelliteLastUpdate,
+                          { color: isDarkTheme ? "#888" : "#94a3b8" },
+                        ]}
+                      >
+                        Last updated:{" "}
+                        {satelliteInfo.lastUpdate > 0
+                          ? new Date(
+                              satelliteInfo.lastUpdate
+                            ).toLocaleTimeString()
+                          : "Never"}
+                      </Text>
+                      <TouchableOpacity
+                        onPress={() => setShowSatelliteDialog(false)}
+                        style={[
+                          styles.modalButton,
+                          { backgroundColor: theme.colors.primary },
+                        ]}
+                      >
+                        <Text style={styles.modalConfirmButtonText}>Close</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                </Modal>
+
                 {/* About Dialog */}
                 <Modal
                   visible={showAboutDialog}
@@ -1987,7 +2615,8 @@ const App: React.FC = () => {
                           recovery systems{"\n"}• Real-time accuracy monitoring
                           {"\n"}• Intelligent fallback mechanisms{"\n"}•
                           Background location tracking{"\n"}• Comprehensive
-                          error handling
+                          error handling{"\n"}• Live satellite information
+                          viewer
                         </Text>
                       </View>
 
@@ -2470,6 +3099,199 @@ const styles = StyleSheet.create({
     color: "#fff",
     textAlign: "center",
     fontWeight: "600",
+  },
+
+  // Satellite Modal Styles
+  satelliteModalContent: {
+    borderRadius: 12,
+    padding: 0,
+    elevation: 8,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    maxHeight: "90%",
+  },
+  satelliteModalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255, 255, 255, 0.1)",
+  },
+  satelliteModalTitleContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  satelliteModalCloseButton: {
+    padding: 8,
+  },
+  satelliteSummary: {
+    padding: 20,
+  },
+  satelliteSummaryRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 16,
+  },
+  satelliteSummaryItem: {
+    alignItems: "center",
+    flex: 1,
+  },
+  satelliteSummaryValue: {
+    fontSize: 24,
+    fontWeight: "bold",
+    marginBottom: 4,
+  },
+  satelliteSummaryLabel: {
+    fontSize: 10,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  constellationBreakdown: {
+    gap: 8,
+  },
+  constellationItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingVertical: 4,
+  },
+  constellationIndicator: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+  },
+  constellationName: {
+    fontSize: 14,
+    fontWeight: "500",
+    flex: 1,
+  },
+  constellationCount: {
+    fontSize: 14,
+    fontWeight: "bold",
+  },
+  satelliteListContainer: {
+    flex: 1,
+    paddingHorizontal: 20,
+  },
+  satelliteListTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+    marginBottom: 12,
+  },
+  satelliteList: {
+    flex: 1,
+  },
+  satelliteItem: {
+    borderRadius: 8,
+    padding: 16,
+    borderLeftWidth: 4,
+  },
+  satelliteItemSeparator: {
+    height: 8,
+  },
+  satelliteHeader: {
+    marginBottom: 12,
+  },
+  satelliteNameContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 4,
+  },
+  satelliteName: {
+    fontSize: 16,
+    fontWeight: "bold",
+  },
+  satelliteStatusBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  satelliteStatusText: {
+    fontSize: 10,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  satelliteConstellation: {
+    fontSize: 12,
+    fontWeight: "500",
+  },
+  satelliteDetails: {
+    gap: 12,
+  },
+  satelliteDetailRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  satelliteDetailItem: {
+    alignItems: "center",
+    flex: 1,
+  },
+  satelliteDetailLabel: {
+    fontSize: 10,
+    fontWeight: "500",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    marginBottom: 2,
+  },
+  satelliteDetailValue: {
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  signalStrengthContainer: {
+    gap: 4,
+  },
+  signalStrengthLabel: {
+    fontSize: 10,
+    fontWeight: "500",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  signalStrengthBar: {
+    height: 6,
+    borderRadius: 3,
+    overflow: "hidden",
+  },
+  signalStrengthFill: {
+    height: "100%",
+    borderRadius: 3,
+  },
+  signalStrengthValue: {
+    fontSize: 10,
+    fontWeight: "600",
+    textAlign: "right",
+  },
+  noSatellitesContainer: {
+    alignItems: "center",
+    paddingVertical: 48,
+  },
+  noSatellitesText: {
+    fontSize: 16,
+    fontWeight: "600",
+    marginTop: 16,
+  },
+  noSatellitesSubtext: {
+    fontSize: 14,
+    marginTop: 4,
+    textAlign: "center",
+  },
+  satelliteModalFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: 20,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255, 255, 255, 0.1)",
+  },
+  satelliteLastUpdate: {
+    fontSize: 12,
+    fontWeight: "400",
   },
 
   // About Dialog Styles
