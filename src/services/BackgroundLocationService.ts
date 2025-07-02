@@ -119,7 +119,7 @@ export const BackgroundLocationService = {
           distanceInterval: 10, // 10 meters
           deferredUpdatesInterval: 30000, // 30 seconds
           showsBackgroundLocationIndicator: true, // Show system indicator
-          pausesLocationUpdatesAutomatically: false, // Don't pause automatically
+          pausesUpdatesAutomatically: false, // Don't pause automatically
           // Remove foregroundService option to let Expo handle it automatically
         })
       } catch (locationError) {
@@ -133,7 +133,7 @@ export const BackgroundLocationService = {
             timeInterval: 30000, // 30 seconds
             distanceInterval: 50, // 50 meters
             showsBackgroundLocationIndicator: true,
-            pausesLocationUpdatesAutomatically: false,
+            pausesUpdatesAutomatically: false,
           })
         } catch (fallbackError) {
           console.error("Fallback location settings also failed:", fallbackError)

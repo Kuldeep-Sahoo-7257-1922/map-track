@@ -23,3 +23,20 @@ export interface TrackStats {
   distance: number
   duration: number
 }
+
+export interface PlaybackState {
+  isPlaying: boolean
+  currentIndex: number
+  speed: number
+  showControls: boolean
+  autoFollow: boolean
+  showTrail: boolean
+}
+
+export interface PlaybackPosition {
+  index: number
+  location: LocationPoint
+  progress: number
+  timeElapsed: number
+  distanceTraveled: number
+}

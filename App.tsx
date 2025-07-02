@@ -31,7 +31,7 @@ import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 
 import MapComponent from "./src/components/MapView";
 import CrashGuard from "./src/components/CrashGuard";
-import ErrorBoundary from "./src/components/ErrorBoundary";
+import ErrorBoundary from "./src/components/ErrorBoundary"; 
 import { storageUtils } from "./src/utils/storage";
 import {
   generateKML,
@@ -48,6 +48,8 @@ import {
   BackgroundLocationService,
 } from "./src/services/LocationService";
 import type { LocationPoint, SavedTrack } from "./src/types";
+import TrackPlaybackView from "./src/components/TrackPlaybackView";
+import ShareDownloadDialog from "./src/components/ShareDownloadDialog";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const DRAWER_WIDTH = SCREEN_WIDTH * 0.8;
@@ -85,6 +87,12 @@ const App: React.FC = () => {
   const [showAboutDialog, setShowAboutDialog] = useAsyncSafeState(false);
   const [showSatelliteDialog, setShowSatelliteDialog] =
     useAsyncSafeState(false);
+  
+  // NEW: Share/Download Dialog States
+  const [showShareDownloadDialog, setShowShareDownloadDialog] = useAsyncSafeState(false);
+  const [shareDownloadFileType, setShareDownloadFileType] = useAsyncSafeState<"kml" | "gpx" | null>(null);
+  const [shareDownloadTrack, setShareDownloadTrack] = useAsyncSafeState<SavedTrack | null>(null);
+  
   const [savedTracks, setSavedTracks] = useAsyncSafeState<SavedTrack[]>([]);
   const [currentTrackId, setCurrentTrackId] = useAsyncSafeState<string | null>(
     null
@@ -101,11 +109,14 @@ const App: React.FC = () => {
   const [searchQuery, setSearchQuery] = useAsyncSafeState("");
   const [isDrawerOpen, setIsDrawerOpen] = useAsyncSafeState(false);
 
-  // NEW: States for overlay visibility
+  // States for overlay visibility
   const [areOverlaysVisible, setAreOverlaysVisible] = useAsyncSafeState(true);
   const overlayAnim = useRef(new Animated.Value(1)).current;
   const inactivityTimerRef = useRef<NodeJS.Timeout | null>(null);
   const OVERLAY_TIMEOUT = 15000; // 15 seconds
+
+  // States for playback mode
+  const [playbackTrack, setPlaybackTrack] = useAsyncSafeState<SavedTrack | null>(null);
 
   // Enhanced GPS Status states
   const [gpsStatus, setGpsStatus] = useAsyncSafeState<
@@ -131,7 +142,7 @@ const App: React.FC = () => {
   const AUTO_SAVE_INTERVAL = 10000;
   const SATELLITE_UPDATE_INTERVAL = 2000;
 
-  // NEW: Reset inactivity timer
+  // Reset inactivity timer
   const resetInactivityTimer = useCallback(() => {
     if (inactivityTimerRef.current) {
       clearTimeout(inactivityTimerRef.current);
@@ -149,7 +160,7 @@ const App: React.FC = () => {
     }
   }, [areOverlaysVisible, overlayAnim, setAreOverlaysVisible]);
 
-  // NEW: Show overlays and reset timer
+  // Show overlays and reset timer
   const showOverlays = useCallback(() => {
     if (areOverlaysVisible) return;
 
@@ -181,12 +192,13 @@ const App: React.FC = () => {
     };
   }, [areOverlaysVisible, resetInactivityTimer]);
 
-  // NEW: Show overlays when important UI elements are open
+  // Show overlays when important UI elements are open
   useEffect(() => {
     if (
       showTrackNameDialog ||
       showAboutDialog ||
       showSatelliteDialog ||
+      showShareDownloadDialog || // NEW: Include share dialog
       isDrawerOpen
     ) {
       showOverlays();
@@ -195,6 +207,7 @@ const App: React.FC = () => {
     showTrackNameDialog,
     showAboutDialog,
     showSatelliteDialog,
+    showShareDownloadDialog, // NEW: Include share dialog
     isDrawerOpen,
     showOverlays,
   ]);
@@ -329,7 +342,6 @@ const App: React.FC = () => {
   // Monitor GPS status and update satellite data
   useEffect(() => {
     if (!isTracking) {
-      // setGpsStatus("disconnected");
       setSatelliteInfo({
         total: 0,
         used: 0,
@@ -369,7 +381,6 @@ const App: React.FC = () => {
 
       if (timeSinceLastLocation > 30000) {
         // No location for 30 seconds
-        // setGpsStatus("disconnected");
         setSatelliteInfo((prev) => ({
           ...prev,
           used: 0,
@@ -460,7 +471,6 @@ const App: React.FC = () => {
         locationService.addErrorCallback((errorMessage: string) => {
           if (!isUnmountedRef.current) {
             setError(errorMessage);
-            // setGpsStatus("disconnected");
             setSatelliteInfo({
               total: 0,
               used: 0,
@@ -620,7 +630,6 @@ const App: React.FC = () => {
 
       setIsTracking(false);
       setIsPaused(false);
-      // setGpsStatus("disconnected");
       setSatelliteInfo({
         total: 0,
         used: 0,
@@ -660,7 +669,6 @@ const App: React.FC = () => {
     await safeAsync(async () => {
       console.log("⏸️ Pausing location tracking...");
       setIsPaused(true);
-      // setGpsStatus("disconnected");
       setSatelliteInfo((prev) => ({
         ...prev,
         used: 0,
@@ -706,7 +714,6 @@ const App: React.FC = () => {
           "Failed to resume GPS tracking. Please check your location settings."
         );
         setIsPaused(true);
-        // setGpsStatus("disconnected");
         setSatelliteInfo({
           total: 0,
           used: 0,
@@ -857,73 +864,141 @@ const App: React.FC = () => {
     ]
   );
 
-  // Download functions
+  // Enter playback mode
+  const handlePlaybackTrack = useCallback(
+    (track: SavedTrack) => {
+      try {
+        console.log("Entering playback mode for track:", track.name);
+        setPlaybackTrack(track);
+        closeDrawer();
+      } catch (error) {
+        console.error("Playback mode error:", error);
+        handleError(error, "Enter playback mode");
+      }
+    },
+    [setPlaybackTrack, closeDrawer, handleError]
+  );
+
+  // Exit playback mode
+  const exitPlaybackMode = useCallback(() => {
+    setPlaybackTrack(null);
+  }, [setPlaybackTrack]);
+
+  // NEW: Show share/download dialog
+  const showShareDownloadDialogForTrack = useCallback(
+    (fileType: "kml" | "gpx", track?: SavedTrack) => {
+      setShareDownloadFileType(fileType);
+      setShareDownloadTrack(track || null);
+      setShowShareDownloadDialog(true);
+    },
+    [setShareDownloadFileType, setShareDownloadTrack, setShowShareDownloadDialog]
+  );
+
+  // NEW: Handle share action from dialog
+  const handleShareFromDialog = useCallback(async () => {
+    if (!shareDownloadFileType) return;
+
+    await safeAsync(async () => {
+      const trackData = shareDownloadTrack || {
+        name: currentTrackName || "Current Track",
+        locations,
+      };
+      
+      if (!trackData.locations || trackData.locations.length === 0) {
+        setError("No location data to share");
+        return;
+      }
+
+      const content = shareDownloadFileType === "kml" 
+        ? generateKML(trackData.locations, trackData.name)
+        : generateGPX(trackData.locations, trackData.name);
+      
+      const extension = shareDownloadFileType;
+      const filename = `${(trackData.name || "track").replace(
+        /[^a-z0-9]/gi,
+        "_"
+      )}_${new Date().toISOString().split("T")[0]}.${extension}`;
+      const fileUri = `${FileSystem.documentDirectory}${filename}`;
+
+      await FileSystem.writeAsStringAsync(fileUri, content);
+
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(fileUri, {
+          mimeType: shareDownloadFileType === "kml" 
+            ? "application/vnd.google-earth.kml+xml" 
+            : "application/gpx+xml",
+          dialogTitle: `Share ${shareDownloadFileType.toUpperCase()} Track`,
+        });
+      } else {
+        Alert.alert("Success", `${shareDownloadFileType.toUpperCase()} file saved to: ${fileUri}`);
+      }
+
+      setShowShareDownloadDialog(false);
+    }, `Share ${shareDownloadFileType.toUpperCase()}`);
+  }, [
+    shareDownloadFileType,
+    shareDownloadTrack,
+    currentTrackName,
+    locations,
+    setError,
+    safeAsync,
+    setShowShareDownloadDialog,
+  ]);
+
+  // NEW: Handle download action from dialog
+  const handleDownloadFromDialog = useCallback(async () => {
+    if (!shareDownloadFileType) return;
+
+    await safeAsync(async () => {
+      const trackData = shareDownloadTrack || {
+        name: currentTrackName || "Current Track",
+        locations,
+      };
+      
+      if (!trackData.locations || trackData.locations.length === 0) {
+        setError("No location data to download");
+        return;
+      }
+
+      const content = shareDownloadFileType === "kml" 
+        ? generateKML(trackData.locations, trackData.name)
+        : generateGPX(trackData.locations, trackData.name);
+      
+      const extension = shareDownloadFileType;
+      const filename = `${(trackData.name || "track").replace(
+        /[^a-z0-9]/gi,
+        "_"
+      )}_${new Date().toISOString().split("T")[0]}.${extension}`;
+      const fileUri = `${FileSystem.documentDirectory}${filename}`;
+
+      await FileSystem.writeAsStringAsync(fileUri, content);
+      Alert.alert("Success", `${shareDownloadFileType.toUpperCase()} file saved to: ${fileUri}`);
+      
+      setShowShareDownloadDialog(false);
+    }, `Download ${shareDownloadFileType.toUpperCase()}`);
+  }, [
+    shareDownloadFileType,
+    shareDownloadTrack,
+    currentTrackName,
+    locations,
+    setError,
+    safeAsync,
+    setShowShareDownloadDialog,
+  ]);
+
+  // Updated download functions to use the dialog
   const downloadKML = useCallback(
     async (track?: SavedTrack) => {
-      await safeAsync(async () => {
-        const trackData = track || {
-          name: currentTrackName || "Current Track",
-          locations,
-        };
-        if (!trackData.locations || trackData.locations.length === 0) {
-          setError("No location data to download");
-          return;
-        }
-
-        const kmlContent = generateKML(trackData.locations, trackData.name);
-        const filename = `${(trackData.name || "track").replace(
-          /[^a-z0-9]/gi,
-          "_"
-        )}_${new Date().toISOString().split("T")[0]}.kml`;
-        const fileUri = `${FileSystem.documentDirectory}${filename}`;
-
-        await FileSystem.writeAsStringAsync(fileUri, kmlContent);
-
-        if (await Sharing.isAvailableAsync()) {
-          await Sharing.shareAsync(fileUri, {
-            mimeType: "application/vnd.google-earth.kml+xml",
-            dialogTitle: "Share KML Track",
-          });
-        } else {
-          Alert.alert("Success", `KML file saved to: ${fileUri}`);
-        }
-      }, "Download KML");
+      showShareDownloadDialogForTrack("kml", track);
     },
-    [currentTrackName, locations, setError, safeAsync]
+    [showShareDownloadDialogForTrack]
   );
 
   const downloadGPX = useCallback(
     async (track?: SavedTrack) => {
-      await safeAsync(async () => {
-        const trackData = track || {
-          name: currentTrackName || "Current Track",
-          locations,
-        };
-        if (!trackData.locations || trackData.locations.length === 0) {
-          setError("No location data to download");
-          return;
-        }
-
-        const gpxContent = generateGPX(trackData.locations, trackData.name);
-        const filename = `${(trackData.name || "track").replace(
-          /[^a-z0-9]/gi,
-          "_"
-        )}_${new Date().toISOString().split("T")[0]}.gpx`;
-        const fileUri = `${FileSystem.documentDirectory}${filename}`;
-
-        await FileSystem.writeAsStringAsync(fileUri, gpxContent);
-
-        if (await Sharing.isAvailableAsync()) {
-          await Sharing.shareAsync(fileUri, {
-            mimeType: "application/gpx+xml",
-            dialogTitle: "Share GPX Track",
-          });
-        } else {
-          Alert.alert("Success", `GPX file saved to: ${fileUri}`);
-        }
-      }, "Download GPX");
+      showShareDownloadDialogForTrack("gpx", track);
     },
-    [currentTrackName, locations, setError, safeAsync]
+    [showShareDownloadDialogForTrack]
   );
 
   // Delete track
@@ -1038,10 +1113,11 @@ const App: React.FC = () => {
             closeDrawer();
             return true;
           }
-          if (showTrackNameDialog || showAboutDialog || showSatelliteDialog) {
+          if (showTrackNameDialog || showAboutDialog || showSatelliteDialog || showShareDownloadDialog) {
             setShowTrackNameDialog(false);
             setShowAboutDialog(false);
             setShowSatelliteDialog(false);
+            setShowShareDownloadDialog(false); // NEW: Close share dialog
             return true;
           }
           if (isTracking) {
@@ -1077,11 +1153,13 @@ const App: React.FC = () => {
     showTrackNameDialog,
     showAboutDialog,
     showSatelliteDialog,
+    showShareDownloadDialog, // NEW: Include share dialog
     isTracking,
     closeDrawer,
     setShowTrackNameDialog,
     setShowAboutDialog,
     setShowSatelliteDialog,
+    setShowShareDownloadDialog, // NEW: Include share dialog
     stopTracking,
   ]);
 
@@ -1373,7 +1451,7 @@ const App: React.FC = () => {
                 styles.container,
                 { backgroundColor: theme.colors.background },
               ]}
-              onTouchStart={showOverlays} // NEW: Show overlays on any touch
+              onTouchStart={showOverlays}
             >
               <StatusBar
                 barStyle={isDarkTheme ? "light-content" : "dark-content"}
@@ -1397,7 +1475,7 @@ const App: React.FC = () => {
                       style={styles.fullMap}
                       showLayerSelector={true}
                       isFullscreen={false}
-                      onTouch={resetInactivityTimer} // NEW: Reset timer on map touch
+                      onTouch={resetInactivityTimer}
                     />
                   </CrashGuard>
                 </View>
@@ -1767,31 +1845,6 @@ const App: React.FC = () => {
                       </Text>
                     </View>
 
-                    {/* <TouchableOpacity
-                      style={styles.additionalStatItem}
-                      onPress={() => {
-                        resetInactivityTimer();
-                        setShowSatelliteDialog(true);
-                      }}
-                    >
-                      <Text
-                        style={[
-                          styles.additionalStatValue,
-                          { color: isDarkTheme ? "#fff" : theme.colors.text },
-                        ]}
-                      >
-                        {formatConstellations()}
-                      </Text>
-                      <Text
-                        style={[
-                          styles.additionalStatLabel,
-                          { color: isDarkTheme ? "#888" : "#94a3b8" },
-                        ]}
-                      >
-                        GNSS
-                      </Text>
-                    </TouchableOpacity> */}
-
                     <View style={styles.additionalStatItem}>
                       <Text
                         style={[
@@ -1805,6 +1858,10 @@ const App: React.FC = () => {
                         style={[
                           styles.additionalStatLabel,
                           { color: isDarkTheme ? "#888" : "#94a3b8" },
+                        ]}
+                      >
+                        STATUS
+                      
                         ]}
                       >
                         STATUS
@@ -2287,6 +2344,20 @@ const App: React.FC = () => {
                         </View>
 
                         <View style={styles.drawerTrackActions}>
+                          <TouchableOpacity
+                            style={styles.drawerActionButton}
+                            onPress={(e) => {
+                              e.stopPropagation();
+                              handlePlaybackTrack(track);
+                            }}
+                            disabled={isCurrentlyRecording}
+                          >
+                            <MaterialIcons
+                              name="play-circle-outline"
+                              size={18}
+                              color={isCurrentlyRecording ? "#888" : "#8b5cf6"}
+                            />
+                          </TouchableOpacity>
                           {isCurrentlyRecording ? (
                             isPaused ? (
                               <TouchableOpacity
@@ -2485,6 +2556,17 @@ const App: React.FC = () => {
                     </View>
                   </View>
                 </Modal>
+
+                {/* NEW: Share/Download Dialog */}
+                <ShareDownloadDialog
+                  visible={showShareDownloadDialog}
+                  onDismiss={() => setShowShareDownloadDialog(false)}
+                  onShare={handleShareFromDialog}
+                  onDownload={handleDownloadFromDialog}
+                  fileType={shareDownloadFileType}
+                  isDarkTheme={isDarkTheme}
+                  theme={theme}
+                />
 
                 {/* Satellite Information Dialog */}
                 <Modal
@@ -2865,6 +2947,17 @@ const App: React.FC = () => {
                   </View>
                 </Modal>
               </Portal>
+              
+              {/* Track Playback Mode */}
+              {playbackTrack && (
+                <View style={styles.playbackContainer}>
+                  <TrackPlaybackView
+                    track={playbackTrack}
+                    isDarkTheme={isDarkTheme}
+                    onExit={exitPlaybackMode}
+                  />
+                </View>
+              )}
             </SafeAreaView>
           </SafeAreaProvider>
         </PaperProvider>
@@ -3540,6 +3633,14 @@ const styles = StyleSheet.create({
   errorButtonText: {
     color: "#fff",
     fontWeight: "600",
+  },
+  playbackContainer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 3000,
   },
 });
 
