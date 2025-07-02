@@ -2,9 +2,15 @@
   "expo": {
     "name": "Location Tracker",
     "slug": "location-tracker",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#121212"
+    },
     "version": "1.0.0",
     "orientation": "portrait",
-    "userInterfaceStyle": "automatic",
+    "userInterfaceStyle": "dark",
+
     "assetBundlePatterns": [],
     "ios": {
       "supportsTablet": true,
@@ -12,9 +18,7 @@
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "This app needs access to location to track your GPS coordinates.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "This app needs access to location to track your GPS coordinates even when the app is in the background.",
-        "UIBackgroundModes": [
-          "location"
-        ]
+        "UIBackgroundModes": ["location"]
       }
     },
     "android": {
@@ -45,15 +49,13 @@
           "isAndroidForegroundServiceEnabled": true
         }
       ],
-      [
-        "expo-task-manager"
-      ]
+      ["expo-task-manager"]
     ],
     "extra": {
       "eas": {
-        "projectId": "c7b1c0e4-322d-415b-9a11-5f62df2758e3"
+        "projectId": "06db55ee-2d00-438e-b633-4d4f4ed2a261"
       }
     },
-    "owner": "kuldeepsahoohero1"
+    "owner": "kuldeepsahoohero2"
   }
 }

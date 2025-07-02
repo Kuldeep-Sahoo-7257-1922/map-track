@@ -2560,3 +2560,4 @@ const styles = StyleSheet.create({
 });
 
 export default LocationTracker;
+// https://v0.dev/chat/fork-of-mapapp-i90JVrJW5YS-->>main copy v0

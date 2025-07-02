@@ -22,7 +22,6 @@ import {
   Modal,
   FAB,
   Switch,
-  ProgressBar,
 } from "react-native-paper";
 import { MaterialIcons } from "@expo/vector-icons";
 import * as FileSystem from "expo-file-system";
@@ -102,10 +101,16 @@ const App: React.FC = () => {
   const [searchQuery, setSearchQuery] = useAsyncSafeState("");
   const [isDrawerOpen, setIsDrawerOpen] = useAsyncSafeState(false);
 
+  // NEW: States for overlay visibility
+  const [areOverlaysVisible, setAreOverlaysVisible] = useAsyncSafeState(true);
+  const overlayAnim = useRef(new Animated.Value(1)).current;
+  const inactivityTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const OVERLAY_TIMEOUT = 15000; // 15 seconds
+
   // Enhanced GPS Status states
   const [gpsStatus, setGpsStatus] = useAsyncSafeState<
     "searching" | "connected" | "poor" | "disconnected"
-  >("disconnected");
+  >("searching");
   const [satelliteInfo, setSatelliteInfo] =
     useAsyncSafeState<EnhancedSatelliteData>({
       total: 0,
@@ -125,6 +130,74 @@ const App: React.FC = () => {
 
   const AUTO_SAVE_INTERVAL = 10000;
   const SATELLITE_UPDATE_INTERVAL = 2000;
+
+  // NEW: Reset inactivity timer
+  const resetInactivityTimer = useCallback(() => {
+    if (inactivityTimerRef.current) {
+      clearTimeout(inactivityTimerRef.current);
+    }
+
+    // Only set timer if overlays are visible
+    if (areOverlaysVisible) {
+      inactivityTimerRef.current = setTimeout(() => {
+        Animated.timing(overlayAnim, {
+          toValue: 0,
+          duration: 300,
+          useNativeDriver: true,
+        }).start(() => setAreOverlaysVisible(false));
+      }, OVERLAY_TIMEOUT);
+    }
+  }, [areOverlaysVisible, overlayAnim, setAreOverlaysVisible]);
+
+  // NEW: Show overlays and reset timer
+  const showOverlays = useCallback(() => {
+    if (areOverlaysVisible) return;
+
+    setAreOverlaysVisible(true);
+    Animated.timing(overlayAnim, {
+      toValue: 1,
+      duration: 300,
+      useNativeDriver: true,
+    }).start();
+
+    resetInactivityTimer();
+  }, [
+    areOverlaysVisible,
+    overlayAnim,
+    resetInactivityTimer,
+    setAreOverlaysVisible,
+  ]);
+
+  // Initialize/reset timer when overlays become visible
+  useEffect(() => {
+    if (areOverlaysVisible) {
+      resetInactivityTimer();
+    }
+
+    return () => {
+      if (inactivityTimerRef.current) {
+        clearTimeout(inactivityTimerRef.current);
+      }
+    };
+  }, [areOverlaysVisible, resetInactivityTimer]);
+
+  // NEW: Show overlays when important UI elements are open
+  useEffect(() => {
+    if (
+      showTrackNameDialog ||
+      showAboutDialog ||
+      showSatelliteDialog ||
+      isDrawerOpen
+    ) {
+      showOverlays();
+    }
+  }, [
+    showTrackNameDialog,
+    showAboutDialog,
+    showSatelliteDialog,
+    isDrawerOpen,
+    showOverlays,
+  ]);
 
   // Constellation data mapping
   const CONSTELLATION_DATA = {
@@ -247,7 +320,7 @@ const App: React.FC = () => {
       } else if (usedCount >= 3) {
         setGpsStatus("searching");
       } else {
-        setGpsStatus("disconnected");
+        setGpsStatus("searching");
       }
     },
     [setGpsStatus, setSatelliteInfo, setLastLocationTime, generateSatelliteData]
@@ -256,7 +329,7 @@ const App: React.FC = () => {
   // Monitor GPS status and update satellite data
   useEffect(() => {
     if (!isTracking) {
-      setGpsStatus("disconnected");
+      // setGpsStatus("disconnected");
       setSatelliteInfo({
         total: 0,
         used: 0,
@@ -296,7 +369,7 @@ const App: React.FC = () => {
 
       if (timeSinceLastLocation > 30000) {
         // No location for 30 seconds
-        setGpsStatus("disconnected");
+        // setGpsStatus("disconnected");
         setSatelliteInfo((prev) => ({
           ...prev,
           used: 0,
@@ -387,7 +460,7 @@ const App: React.FC = () => {
         locationService.addErrorCallback((errorMessage: string) => {
           if (!isUnmountedRef.current) {
             setError(errorMessage);
-            setGpsStatus("disconnected");
+            // setGpsStatus("disconnected");
             setSatelliteInfo({
               total: 0,
               used: 0,
@@ -547,7 +620,7 @@ const App: React.FC = () => {
 
       setIsTracking(false);
       setIsPaused(false);
-      setGpsStatus("disconnected");
+      // setGpsStatus("disconnected");
       setSatelliteInfo({
         total: 0,
         used: 0,
@@ -587,7 +660,7 @@ const App: React.FC = () => {
     await safeAsync(async () => {
       console.log("⏸️ Pausing location tracking...");
       setIsPaused(true);
-      setGpsStatus("disconnected");
+      // setGpsStatus("disconnected");
       setSatelliteInfo((prev) => ({
         ...prev,
         used: 0,
@@ -633,7 +706,7 @@ const App: React.FC = () => {
           "Failed to resume GPS tracking. Please check your location settings."
         );
         setIsPaused(true);
-        setGpsStatus("disconnected");
+        // setGpsStatus("disconnected");
         setSatelliteInfo({
           total: 0,
           used: 0,
@@ -1023,6 +1096,9 @@ const App: React.FC = () => {
       if (satelliteUpdateIntervalRef.current) {
         clearInterval(satelliteUpdateIntervalRef.current);
       }
+      if (inactivityTimerRef.current) {
+        clearTimeout(inactivityTimerRef.current);
+      }
     };
   }, []);
 
@@ -1297,6 +1373,7 @@ const App: React.FC = () => {
                 styles.container,
                 { backgroundColor: theme.colors.background },
               ]}
+              onTouchStart={showOverlays} // NEW: Show overlays on any touch
             >
               <StatusBar
                 barStyle={isDarkTheme ? "light-content" : "dark-content"}
@@ -1320,12 +1397,13 @@ const App: React.FC = () => {
                       style={styles.fullMap}
                       showLayerSelector={true}
                       isFullscreen={false}
+                      onTouch={resetInactivityTimer} // NEW: Reset timer on map touch
                     />
                   </CrashGuard>
                 </View>
 
                 {/* Top Overlay - Header with Enhanced GPS Status */}
-                <View
+                <Animated.View
                   style={[
                     styles.mapTopOverlay,
                     {
@@ -1335,11 +1413,24 @@ const App: React.FC = () => {
                       borderBottomColor: isDarkTheme
                         ? "rgba(255, 255, 255, 0.1)"
                         : "rgba(0, 0, 0, 0.1)",
+                      opacity: overlayAnim,
+                      transform: [
+                        {
+                          translateY: overlayAnim.interpolate({
+                            inputRange: [0, 1],
+                            outputRange: [-100, 0],
+                          }),
+                        },
+                      ],
                     },
                   ]}
+                  pointerEvents={areOverlaysVisible ? "auto" : "none"}
                 >
                   <TouchableOpacity
-                    onPress={openDrawer}
+                    onPress={() => {
+                      resetInactivityTimer();
+                      openDrawer();
+                    }}
                     style={styles.backButton}
                   >
                     <MaterialIcons
@@ -1362,7 +1453,10 @@ const App: React.FC = () => {
                             : theme.colors.primary + "40",
                         },
                       ]}
-                      onPress={() => setShowSatelliteDialog(true)}
+                      onPress={() => {
+                        resetInactivityTimer();
+                        setShowSatelliteDialog(true);
+                      }}
                     >
                       <MaterialIcons
                         name={getGpsStatusIcon()}
@@ -1370,6 +1464,8 @@ const App: React.FC = () => {
                         color={getGpsStatusColor()}
                       />
                       <Text
+                        numberOfLines={1}
+                        ellipsizeMode="tail"
                         style={[
                           styles.statisticsText,
                           {
@@ -1381,8 +1477,6 @@ const App: React.FC = () => {
                           ? `${selectedTracks.length} Track${
                               selectedTracks.length > 1 ? "s" : ""
                             } Selected`
-                          : isTracking
-                          ? `${currentTrackName} • ${satelliteInfo.used}/${satelliteInfo.total} SAT`
                           : "GPS Tracker"}
                       </Text>
                     </TouchableOpacity>
@@ -1391,7 +1485,10 @@ const App: React.FC = () => {
                   <View style={styles.mapHeaderRight}>
                     <TouchableOpacity
                       style={styles.mapIconButton}
-                      onPress={() => downloadKML()}
+                      onPress={() => {
+                        resetInactivityTimer();
+                        downloadKML();
+                      }}
                     >
                       <MaterialIcons
                         name="download"
@@ -1401,7 +1498,10 @@ const App: React.FC = () => {
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={styles.mapIconButton}
-                      onPress={() => downloadGPX()}
+                      onPress={() => {
+                        resetInactivityTimer();
+                        downloadGPX();
+                      }}
                     >
                       <MaterialIcons
                         name="file-download"
@@ -1411,7 +1511,10 @@ const App: React.FC = () => {
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={styles.mapIconButton}
-                      onPress={importFile}
+                      onPress={() => {
+                        resetInactivityTimer();
+                        importFile();
+                      }}
                     >
                       <MaterialIcons
                         name="upload"
@@ -1420,18 +1523,28 @@ const App: React.FC = () => {
                       />
                     </TouchableOpacity>
                   </View>
-                </View>
+                </Animated.View>
 
                 {/* Bottom Overlay - Enhanced Statistics with Dynamic GPS Info */}
-                <View
+                <Animated.View
                   style={[
                     styles.mapBottomOverlay,
                     {
                       backgroundColor: isDarkTheme
                         ? "rgba(0, 0, 0, 0.6)"
                         : "rgba(255, 255, 255, 0.7)",
+                      opacity: overlayAnim,
+                      transform: [
+                        {
+                          translateY: overlayAnim.interpolate({
+                            inputRange: [0, 1],
+                            outputRange: [100, 0],
+                          }),
+                        },
+                      ],
                     },
                   ]}
+                  pointerEvents={areOverlaysVisible ? "auto" : "none"}
                 >
                   <View style={styles.statsRow}>
                     <View style={styles.statItem}>
@@ -1465,7 +1578,10 @@ const App: React.FC = () => {
 
                     <TouchableOpacity
                       style={styles.statItem}
-                      onPress={() => setShowSatelliteDialog(true)}
+                      onPress={() => {
+                        resetInactivityTimer();
+                        setShowSatelliteDialog(true);
+                      }}
                     >
                       <View style={styles.gpsStatusContainer}>
                         <MaterialIcons
@@ -1609,9 +1725,54 @@ const App: React.FC = () => {
                       </Text>
                     </View>
 
-                    <TouchableOpacity
+                    <View style={styles.additionalStatItem}>
+                      <Text
+                        style={[
+                          styles.additionalStatValue,
+                          { color: isDarkTheme ? "#fff" : theme.colors.text },
+                        ]}
+                      >
+                        {currentLocation?.latitude
+                          ? `${currentLocation.latitude.toFixed(5)}°`
+                          : "0.00000°"}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.additionalStatLabel,
+                          { color: isDarkTheme ? "#888" : "#94a3b8" },
+                        ]}
+                      >
+                        LATITUDE
+                      </Text>
+                    </View>
+
+                    <View style={styles.additionalStatItem}>
+                      <Text
+                        style={[
+                          styles.additionalStatValue,
+                          { color: isDarkTheme ? "#fff" : theme.colors.text },
+                        ]}
+                      >
+                        {currentLocation?.longitude
+                          ? `${currentLocation.longitude.toFixed(5)}°`
+                          : "0.00000°"}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.additionalStatLabel,
+                          { color: isDarkTheme ? "#888" : "#94a3b8" },
+                        ]}
+                      >
+                        LONGITUDE
+                      </Text>
+                    </View>
+
+                    {/* <TouchableOpacity
                       style={styles.additionalStatItem}
-                      onPress={() => setShowSatelliteDialog(true)}
+                      onPress={() => {
+                        resetInactivityTimer();
+                        setShowSatelliteDialog(true);
+                      }}
                     >
                       <Text
                         style={[
@@ -1629,7 +1790,7 @@ const App: React.FC = () => {
                       >
                         GNSS
                       </Text>
-                    </TouchableOpacity>
+                    </TouchableOpacity> */}
 
                     <View style={styles.additionalStatItem}>
                       <Text
@@ -1650,10 +1811,17 @@ const App: React.FC = () => {
                       </Text>
                     </View>
                   </View>
-                </View>
+                </Animated.View>
 
                 {/* Control Buttons - Over Stats */}
-                <View style={styles.mapControlButtons}>
+                <Animated.View
+                  style={[
+                    styles.mapControlButtons,
+                    {
+                      opacity: overlayAnim,
+                    },
+                  ]}
+                >
                   {!isTracking ? (
                     <FAB
                       icon="play"
@@ -1662,6 +1830,7 @@ const App: React.FC = () => {
                         { backgroundColor: theme.colors.accent },
                       ]}
                       onPress={() => {
+                        resetInactivityTimer();
                         setTrackNameInput(
                           `Track ${new Date().toLocaleDateString()}`
                         );
@@ -1675,7 +1844,10 @@ const App: React.FC = () => {
                         styles.playButton,
                         { backgroundColor: theme.colors.accent },
                       ]}
-                      onPress={resumeTracking}
+                      onPress={() => {
+                        resetInactivityTimer();
+                        resumeTracking();
+                      }}
                     />
                   ) : (
                     <FAB
@@ -1684,10 +1856,13 @@ const App: React.FC = () => {
                         styles.playButton,
                         { backgroundColor: "#f59e0b" },
                       ]}
-                      onPress={pauseTracking}
+                      onPress={() => {
+                        resetInactivityTimer();
+                        pauseTracking();
+                      }}
                     />
                   )}
-                </View>
+                </Animated.View>
               </View>
 
               {/* Navigation Drawer */}
@@ -2616,7 +2791,7 @@ const App: React.FC = () => {
                           {"\n"}• Intelligent fallback mechanisms{"\n"}•
                           Background location tracking{"\n"}• Comprehensive
                           error handling{"\n"}• Live satellite information
-                          viewer
+                          viewer{"\n"}• Auto-hide UI with inactivity timer
                         </Text>
                       </View>
 
