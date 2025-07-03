@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { View, StyleSheet, Text } from "react-native";
 import { WebView } from "react-native-webview";
 import type { LocationPoint } from "../types";
+import { Linking } from "react-native";
 
 interface Props {
   locations: LocationPoint[];
@@ -51,29 +52,67 @@ const MapComponent: React.FC<Props> = ({
       height: 100vh; 
       width: 100vw; 
       background-color: ${isDarkTheme ? "#1f2937" : "#f3f4f6"};
+      }
+    /* Common style */
+    .watermark {
+      position: absolute;
+      font-size: 12px;
+      font-weight: 500;
+      color: rgba(0, 0, 0, 0.25);
+      user-select: none;
+      pointer-events: auto;
+      z-index: 1000;
+      transform-origin: center;
     }
+
+    /* Individual positions + slight rotation */
+    .watermark-1  { top: 10px; left: 10px; transform: rotate(-25deg); }
+    .watermark-2  { top: 10px; right: 10px; transform: rotate(-25deg); }
+    .watermark-3  { bottom: 10px; left: 10px; transform: rotate(-25deg); }
+    .watermark-4  { bottom: 10px; right: 10px; transform: rotate(-25deg); }
+
+    .watermark-5  { top: 50%; left: 10px; transform: translateY(-50%) rotate(-25deg); }
+    .watermark-6  { top: 50%; right: 10px; transform: translateY(-50%) rotate(-25deg); }
+
+    .watermark-7  { top: 10px; left: 50%; transform: translateX(-50%) rotate(-25deg); }
+    .watermark-8  { bottom: 10px; left: 50%; transform: translateX(-50%) rotate(-25deg); }
+
+    .watermark-9  { top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-25deg); }
+    .watermark-10 { top: 70%; left: 20%; transform: rotate(-25deg); }
+
+    .watermark-11 { top: 25%; left: 5%; transform: rotate(-25deg); }
+    .watermark-12 { top: 70%; right: 5%; transform: rotate(-25deg); }
+    .watermark-13 { bottom: 25%; left: 5%; transform: rotate(-25deg); }
+    .watermark-14 { bottom: 70%; right: 5%; transform: rotate(-25deg); }
+
+    .watermark-15 { top: 25%; left: 50%; transform: translateX(-50%) rotate(-25deg); }
+    .watermark-16 { bottom: 25%; left: 50%; transform: translateX(-50%) rotate(-25deg); }
+
+
+    .watermark-19 { top: 60%; left: 60%; transform: rotate(-25deg); }
+    .watermark-20 { top: 40%; right: 40%; transform: rotate(-25deg); }
+
     .layer-control {
       position: absolute;
-      top: 70px; /* Moved down below header */
+      top: 100px; /* Moved down below header */
       right: 10px;
       z-index: 1000;
       background: ${
         isDarkTheme ? "rgba(0, 0, 0, 0.9)" : "rgba(255, 255, 255, 0.95)"
       };
       border-radius: 8px;
-      padding: 8px;
+      padding: 4px;
       box-shadow: 0 2px 10px rgba(0,0,0,0.3);
-      min-width: 150px;
-      border: 1px solid ${isDarkTheme ? "#374151" : "#e2e8f0"};
+      width: 30px;
+      overflow:hidden;
     }
     .layer-control select {
-      border: 1px solid ${isDarkTheme ? "#555" : "#ccc"};
       background: ${isDarkTheme ? "rgba(0, 0, 0, 0.8)" : "white"};
       color: ${isDarkTheme ? "white" : "black"};
       font-size: 14px;
       padding: 6px;
       border-radius: 4px;
-      width: 100%;
+      border:none;
     }
     .map-controls {
       position: absolute;
@@ -155,6 +194,8 @@ const MapComponent: React.FC<Props> = ({
       animation: pulse-recording 2s infinite;
     }
 
+
+
     @keyframes pulse-recording {
       0% {
         transform: scale(1);
@@ -177,28 +218,55 @@ const MapComponent: React.FC<Props> = ({
 </head>
 <body>
   <div id="map"></div>
+  
+  
+  
   <div id="errorMessage" class="error-message">
-    <h3>Map Loading Error</h3>
-    <p>Failed to load the map. Please check your internet connection.</p>
-    <button onclick="retryMap()">Retry</button>
+  <h3>Map Loading Error</h3>
+  <p>Failed to load the map. Please check your internet connection.</p>
+  <button onclick="retryMap()">Retry</button>
   </div>
   
   ${
     isFullscreen
       ? `
-  <button class="exit-fullscreen" onclick="exitFullscreen()">
+    <button class="exit-fullscreen" onclick="exitFullscreen()">
     ← Exit Fullscreen
-  </button>
-  `
+    </button>
+    `
       : ""
   }
-  
-  ${
-    showLayerSelector
-      ? `
+    
+    ${
+      showLayerSelector
+        ? `
+<div class="watermark-grid">
+  <a href="https://github.com/Kuldeep-Sahoo-7257-1922" class="watermark watermark-0" target="_blank">@kuldeep.dev</a>
+  <a href="https://github.com/Kuldeep-Sahoo-7257-1922" class="watermark watermark-1" target="_blank">@kuldeep.dev</a>
+  <a href="https://github.com/Kuldeep-Sahoo-7257-1922" class="watermark watermark-2" target="_blank">@kuldeep.dev</a>
+  <a href="https://github.com/Kuldeep-Sahoo-7257-1922" class="watermark watermark-3" target="_blank">@kuldeep.dev</a>
+  <a href="https://github.com/Kuldeep-Sahoo-7257-1922" class="watermark watermark-4" target="_blank">@kuldeep.dev</a>
+  <a href="https://github.com/Kuldeep-Sahoo-7257-1922" class="watermark watermark-5" target="_blank">@kuldeep.dev</a>
+  <a href="https://github.com/Kuldeep-Sahoo-7257-1922" class="watermark watermark-6" target="_blank">@kuldeep.dev</a>
+  <a href="https://github.com/Kuldeep-Sahoo-7257-1922" class="watermark watermark-7" target="_blank">@kuldeep.dev</a>
+  <a href="https://github.com/Kuldeep-Sahoo-7257-1922" class="watermark watermark-8" target="_blank">@kuldeep.dev</a>
+  <a href="https://github.com/Kuldeep-Sahoo-7257-1922" class="watermark watermark-9" target="_blank">@kuldeep.dev</a>
+  <a href="https://github.com/Kuldeep-Sahoo-7257-1922" target="_blank" class="watermark watermark-11">@kuldeep.dev</a>
+  <a href="https://github.com/Kuldeep-Sahoo-7257-1922" target="_blank" class="watermark watermark-12">@kuldeep.dev</a>
+  <a href="https://github.com/Kuldeep-Sahoo-7257-1922" target="_blank" class="watermark watermark-13">@kuldeep.dev</a>
+  <a href="https://github.com/Kuldeep-Sahoo-7257-1922" target="_blank" class="watermark watermark-14">@kuldeep.dev</a>
+  <a href="https://github.com/Kuldeep-Sahoo-7257-1922" target="_blank" class="watermark watermark-15">@kuldeep.dev</a>
+  <a href="https://github.com/Kuldeep-Sahoo-7257-1922" target="_blank" class="watermark watermark-16">@kuldeep.dev</a>
+
+</div>
+
+
+
+
   <div class="layer-control">
     <select id="layerSelect" onchange="changeLayer()">
-      <option value="satellite" selected>satellite</option>
+      <option disabled selected>🛰️</option>
+      <option value="satellite">satellite</option>
       <option value="osm">Street Map</option>
       <option value="terrain">Terrain</option>
     </select>
@@ -210,8 +278,8 @@ const MapComponent: React.FC<Props> = ({
     <button class="control-button current-location-btn" onclick="goToCurrentLocation()" id="currentLocationBtn" style="display: none;">📍</button>
   </div>
   `
-      : ""
-  }
+        : ""
+    }
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
@@ -636,7 +704,7 @@ const MapComponent: React.FC<Props> = ({
                 const arrowLng = prev.longitude + (curr.longitude - prev.longitude) * ratio;
 
                 const directionArrow = window.L.divIcon({
-                  html: \`<div style="transform: rotate(\${bearing}deg); width: 20px; height: 20px; display: flex; align-items: center; justify-content: center;">
+                  html: \`<div style="transform: rotate(-25degbearing}deg); width: 20px; height: 20px; display: flex; align-items: center; justify-content: center;">
            <svg width="20" height="20" viewBox="0 0 20 20" style="filter: drop-shadow(0 2px 3px rgba(0,0,0,0.5));">
              <path d="M10 2 L16 14 L10 11 L4 14 Z" fill="\${trackColor}" stroke="white" strokeWidth="1.5"/>
            </svg>
@@ -697,7 +765,7 @@ const MapComponent: React.FC<Props> = ({
               );
 
               const endIcon = window.L.divIcon({
-                html: \`<div style="transform: rotate(\${bearing}deg); width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;">
+                html: \`<div style="transform: rotate(-25degbearing}deg); width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;">
                        <svg width="24" height="24" viewBox="0 0 24 24" style="filter: drop-shadow(0 2px 4px rgba(0,0,0,0.4));">
                          <path d="M12 2 L20 18 L12 15 L4 18 Z" fill="\${trackColor}" stroke="white" strokeWidth="1.5"/>
                        </svg>
@@ -745,6 +813,22 @@ const MapComponent: React.FC<Props> = ({
       window.initializeMap();
     }
   </script>
+  <script>
+  document.addEventListener('click', function(event) {
+  const target = event.target.closest('a');
+  if (target && target.href && target.target === '_blank') {
+    event.preventDefault();
+    if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+      window.ReactNativeWebView.postMessage(JSON.stringify({
+        type: 'openLink',
+        url: target.href
+      }));
+    }
+  }
+});
+
+</script>
+
 </body>
 </html>
     `;
@@ -760,11 +844,14 @@ const MapComponent: React.FC<Props> = ({
       } else if (data.type === "mapReady") {
         console.log("Map is ready");
         setIsMapLoaded(true);
+      } else if (data.type === "openLink" && data.url) {
+        Linking.openURL(data.url);
       }
     } catch (error) {
       console.error("Error parsing WebView message:", error);
     }
   };
+  
 
   // Handle WebView errors
   const handleError = (syntheticEvent: any) => {

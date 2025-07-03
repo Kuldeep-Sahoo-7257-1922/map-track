@@ -49,9 +49,7 @@ const TrackPlaybackView: React.FC<Props> = ({
     showDynamicInfo: false,
   });
 
-  const PLAYBACK_SPEEDS = [
-    0.5, 1, 2, 4, 6, 8, 10, 12, 16, 24, 32, 48, 64, 80, 100,
-  ];
+  const PLAYBACK_SPEEDS = [0.5, 1, 2, 4, 6, 8, 10, 12, 16, 24, 32, 48, 64, 80, 100];
 
   // Calculate total duration and setup initial state
   useEffect(() => {
